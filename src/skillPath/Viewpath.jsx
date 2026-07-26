@@ -257,10 +257,10 @@ function ViewPath() {
       for (const file of selectedFiles) {
         const fileExt = file.name.split(".").pop();
         const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
-        const filePath = `learning_paths/${pathId}/${fileName}`;
+        const filePath = `${pathId}/${fileName}`;
 
         const { data: uploadData, error: uploadError } = await supabase.storage
-          .from("avatars")
+          .from("learning_paths")
           .upload(filePath, file);
 
         if (uploadError) {
@@ -270,7 +270,7 @@ function ViewPath() {
         }
 
         const { data: publicUrlData } = supabase.storage
-          .from("avatars")
+          .from("learning_paths")
           .getPublicUrl(filePath);
 
         uploadedFiles.push({
@@ -318,7 +318,7 @@ function ViewPath() {
 
     if (fileToRemove?.path) {
       try {
-        await supabase.storage.from("avatars").remove([fileToRemove.path]);
+        await supabase.storage.from("learning_paths").remove([fileToRemove.path]);
       } catch (err) {
         console.error("Failed to delete file from Supabase Storage:", err);
       }
@@ -436,7 +436,7 @@ function ViewPath() {
           for (const file of files) {
             if (file.path) {
               const { error: storageError } = await supabase.storage
-                .from("avatars")
+                .from("learning_paths")
                 .remove([file.path]);
 
               if (storageError) {
