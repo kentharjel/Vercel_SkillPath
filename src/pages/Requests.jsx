@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { db, auth } from "../firebase";
-import { collection, onSnapshot, doc, updateDoc, arrayUnion, query, orderBy } from "firebase/firestore";
+import { onAuthStateChanged } from "firebase/auth";
+import { collection, onSnapshot, doc, getDoc, updateDoc, arrayUnion, query, orderBy } from "firebase/firestore";
 import { motion, AnimatePresence } from "framer-motion";
 
 function Requests() {
@@ -10,6 +11,10 @@ function Requests() {
   const [selectedTicket, setSelectedTicket] = useState(null);
   const [replyText, setReplyText] = useState("");
   const [sending, setSending] = useState(false);
+  const [currentUserProfile, setCurrentUserProfile] = useState(null);
+  
+  // Cache fetched user profiles by UID to avoid redundant Firestore reads
+  const [userProfilesCache, setUserProfilesCache] = useState({});
 
   // Resolution Evaluation Modal States
   const [showCloseModal, setShowCloseModal] = useState(false);
@@ -19,7 +24,9 @@ function Requests() {
   // Helper: Format elapsed time relative to current date
   const getTimeElapsed = (timestamp) => {
     if (!timestamp) return "Just now";
-    const created = new Date(timestamp);
+    const created = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
+    if (isNaN(created.getTime())) return "Just now";
+
     const now = new Date();
     const diffMs = Math.abs(now - created);
     
@@ -33,22 +40,117 @@ function Requests() {
     return "Just now";
   };
 
-  // 1. Listen to all tickets in real-time
+  // Helper for formatting roles
+  const formatRole = (role) => {
+    if (role === "admin assistant" || role === "admin_assistant") return "Admin Assistant";
+    if (role === "admin") return "Admin";
+    return role || "Support";
+  };
+
+  // 1. Helper: Fetch profile photo using all common key fallbacks + cached user doc
+  const getUserAvatar = (ticket) => {
+    if (!ticket) return null;
+    const uid = ticket.userId || ticket.studentId || ticket.createdBy || ticket.uid;
+    const cachedUser = userProfilesCache[uid];
+
+    return (
+      ticket.userPhoto || 
+      ticket.photoURL || 
+      ticket.profilePic || 
+      ticket.profilePicture || 
+      ticket.userAvatar || 
+      ticket.avatar || 
+      cachedUser?.profilePicture || 
+      cachedUser?.photoURL || 
+      cachedUser?.avatar || 
+      null
+    );
+  };
+
+  // 2. Helper: Fetch display name using all common key fallbacks + cached user doc
+  const getUserDisplayName = (ticket) => {
+    if (!ticket) return "User";
+    const uid = ticket.userId || ticket.studentId || ticket.createdBy || ticket.uid;
+    const cachedUser = userProfilesCache[uid];
+
+    return (
+      ticket.userName || 
+      ticket.displayName || 
+      ticket.studentName || 
+      ticket.fullname || 
+      cachedUser?.fullname || 
+      cachedUser?.displayName || 
+      "User"
+    );
+  };
+
+  // 3. Fetch logged in admin profile details
+  useEffect(() => {
+    const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        try {
+          const userDoc = await getDoc(doc(db, "users", user.uid));
+          if (userDoc.exists()) {
+            setCurrentUserProfile(userDoc.data());
+          } else {
+            setCurrentUserProfile({
+              fullname: user.displayName || "Admin Support",
+              role: "admin",
+              photoURL: user.photoURL || null
+            });
+          }
+        } catch (err) {
+          console.error("Error fetching admin profile:", err);
+        }
+      }
+    });
+
+    return () => unsubscribeAuth();
+  }, []);
+
+  // 4. Listen to tickets in real-time and fetch student user profiles dynamically if missing
   useEffect(() => {
     const q = query(collection(db, "tickets"), orderBy("createdAt", "desc"));
     
-    const unsubscribe = onSnapshot(q, (snapshot) => {
+    const unsubscribe = onSnapshot(q, async (snapshot) => {
       const docsData = snapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data()
       }));
+
       setTickets(docsData);
       
-      if (selectedTicket) {
-        const updated = docsData.find(t => t.id === selectedTicket.id);
-        if (updated) setSelectedTicket(updated);
+      // Update selected ticket in real-time if open
+      setSelectedTicket(prevSelected => {
+        if (!prevSelected) return null;
+        return docsData.find(t => t.id === prevSelected.id) || prevSelected;
+      });
+
+      // Find any missing user profiles that need fetching from "users" collection
+      const missingUids = docsData
+        .map(t => t.userId || t.studentId || t.createdBy || t.uid)
+        .filter(uid => uid && !userProfilesCache[uid]);
+
+      if (missingUids.length > 0) {
+        const uniqueUids = [...new Set(missingUids)];
+        const newProfiles = {};
+
+        for (const uid of uniqueUids) {
+          try {
+            const uSnap = await getDoc(doc(db, "users", uid));
+            if (uSnap.exists()) {
+              newProfiles[uid] = uSnap.data();
+            }
+          } catch (e) {
+            console.error("Error loading user profile for", uid, e);
+          }
+        }
+
+        if (Object.keys(newProfiles).length > 0) {
+          setUserProfilesCache(prev => ({ ...prev, ...newProfiles }));
+        }
       }
-      
+
       setLoading(false);
     }, (error) => {
       console.error("Error fetching tickets:", error);
@@ -56,9 +158,9 @@ function Requests() {
     });
 
     return () => unsubscribe();
-  }, [selectedTicket?.id]);
+  }, [userProfilesCache]);
 
-  // 2. Transmit Admin Reply
+  // Transmit Reply
   const handleSendReply = async (e) => {
     e.preventDefault();
     if (!replyText.trim() || !selectedTicket || sending || selectedTicket.status === "resolved") return;
@@ -66,10 +168,14 @@ function Requests() {
     setSending(true);
     try {
       const ticketDocRef = doc(db, "tickets", selectedTicket.id);
+      const responderName = currentUserProfile?.fullname || auth.currentUser?.displayName || "Support Team";
+      const responderRole = formatRole(currentUserProfile?.role);
+      const responderPhoto = currentUserProfile?.photoURL || auth.currentUser?.photoURL || null;
       
       const newReply = {
         senderId: auth.currentUser?.uid || "admin",
-        senderName: "Admin Support",
+        senderName: `${responderName} (${responderRole})`,
+        senderPhoto: responderPhoto,
         message: replyText.trim(),
         timestamp: new Date().toISOString(),
         isAdmin: true
@@ -83,24 +189,31 @@ function Requests() {
 
       setReplyText("");
     } catch (error) {
-      console.error("Error transmitting admin response:", error);
+      console.error("Error transmitting response:", error);
     } finally {
       setSending(false);
     }
   };
 
-  // 3. Finalize Closing Ticket with Evaluation
+  // Close ticket with evaluation
   const handleConfirmCloseTicket = async (e) => {
     e.preventDefault();
     if (!selectedTicket) return;
 
     try {
       const ticketDocRef = doc(db, "tickets", selectedTicket.id);
+      const resolverName = currentUserProfile?.fullname || auth.currentUser?.displayName || "Support Team";
+      const resolverRole = formatRole(currentUserProfile?.role);
+      const resolverPhoto = currentUserProfile?.photoURL || auth.currentUser?.photoURL || null;
+
       await updateDoc(ticketDocRef, {
         status: "resolved",
         evaluation: {
           rating: rating,
-          note: evaluationNote.trim() || "Resolved by admin.",
+          note: evaluationNote.trim() || "Resolved by support.",
+          resolvedBy: `${resolverName} (${resolverRole})`,
+          resolvedByPhoto: resolverPhoto,
+          resolvedById: auth.currentUser?.uid || null,
           closedAt: new Date().toISOString()
         },
         lastUpdatedAt: new Date().toISOString()
@@ -110,7 +223,7 @@ function Requests() {
       setEvaluationNote("");
       setRating(5);
     } catch (error) {
-      console.error("Error closing ticket with evaluation:", error);
+      console.error("Error closing ticket:", error);
     }
   };
 
@@ -157,7 +270,7 @@ function Requests() {
               </div>
             </div>
 
-            {/* TICKET TILES LIST */}
+            {/* TICKET CARD LIST */}
             {displayedTickets.length === 0 ? (
               <div className="card border-0 shadow-sm rounded-4 p-5 text-center bg-white">
                 <span className="fs-1">📂</span>
@@ -168,56 +281,96 @@ function Requests() {
               </div>
             ) : (
               <div className="row g-3">
-                {displayedTickets.map((ticket) => (
-                  <div className="col-12" key={ticket.id}>
-                    <motion.div 
-                      className="card border-0 shadow-sm rounded-4 bg-white p-4 hover-shadow"
-                      style={{ cursor: "pointer" }}
-                      whileHover={{ scale: 1.005 }}
-                      onClick={() => setSelectedTicket(ticket)}
-                    >
-                      <div className="d-flex align-items-center justify-content-between flex-wrap gap-2">
-                        <div className="d-flex align-items-center gap-3">
-                          <div className="bg-primary bg-opacity-10 text-primary rounded-circle d-flex align-items-center justify-content-center fw-bold" style={{ width: "48px", height: "48px" }}>
-                            {ticket.userName ? ticket.userName.charAt(0).toUpperCase() : "U"}
-                          </div>
-                          <div>
-                            <div className="d-flex align-items-center gap-2">
-                              <h6 className="fw-bold mb-0 text-dark">{ticket.subject || "No Subject"}</h6>
-                              <span className="badge bg-light text-muted border small" style={{ fontSize: "0.65rem" }}>
-                                ⏱️ {getTimeElapsed(ticket.createdAt)}
-                              </span>
+                {displayedTickets.map((ticket) => {
+                  const userAvatar = getUserAvatar(ticket);
+                  const userName = getUserDisplayName(ticket);
+
+                  return (
+                    <div className="col-12" key={ticket.id}>
+                      <motion.div 
+                        className="card border-0 shadow-sm rounded-4 bg-white p-4 hover-shadow"
+                        style={{ cursor: "pointer" }}
+                        whileHover={{ scale: 1.005 }}
+                        onClick={() => setSelectedTicket(ticket)}
+                      >
+                        <div className="d-flex align-items-center justify-content-between flex-wrap gap-2">
+                          
+                          {/* USER PROFILE AVATAR & NAME (MATCHING VIEWCLASS STYLE) */}
+                          <div className="d-flex align-items-center gap-3">
+                            {userAvatar ? (
+                              <img 
+                                src={userAvatar} 
+                                alt={userName} 
+                                className="rounded-circle border shadow-sm"
+                                style={{ width: "48px", height: "48px", objectFit: "cover" }}
+                              />
+                            ) : (
+                              <div 
+                                className="bg-primary text-white rounded-circle d-flex align-items-center justify-content-center fw-bold shadow-sm" 
+                                style={{ width: "48px", height: "48px", fontSize: "1.2rem" }}
+                              >
+                                {userName.charAt(0).toUpperCase()}
+                              </div>
+                            )}
+
+                            <div>
+                              <div className="d-flex align-items-center gap-2">
+                                <h6 className="fw-bold mb-0 text-dark">{ticket.subject || "No Subject"}</h6>
+                                <span className="badge bg-light text-muted border small" style={{ fontSize: "0.65rem" }}>
+                                  ⏱️ {getTimeElapsed(ticket.createdAt)}
+                                </span>
+                              </div>
+
+                              <div className="d-flex align-items-center gap-1 mt-0.5">
+                                <span className="text-primary fw-bold small">{userName}</span>
+                                {ticket.userEmail && <span className="text-muted small">({ticket.userEmail})</span>}
+                              </div>
                             </div>
-                            <p className="text-muted small mb-0">{ticket.userName} ({ticket.userEmail})</p>
+                          </div>
+
+                          <div className="text-end d-flex align-items-center gap-3">
+                            <span className={`badge rounded-pill px-3 py-1.5 small fw-bold ${
+                              ticket.status === "resolved" ? "bg-secondary text-white" :
+                              ticket.status === "replied" ? "bg-light text-success border border-success" : "bg-danger text-white animate-pulse"
+                            }`}>
+                              {ticket.status === "resolved" ? "Resolved" : ticket.status || "Pending"}
+                            </span>
                           </div>
                         </div>
-
-                        <div className="text-end d-flex align-items-center gap-3">
-                          <span className={`badge rounded-pill px-3 py-1.5 small fw-bold ${
-                            ticket.status === "resolved" ? "bg-secondary text-white" :
-                            ticket.status === "replied" ? "bg-light text-success border border-success" : "bg-danger text-white animate-pulse"
-                          }`}>
-                            {ticket.status === "resolved" ? "Resolved" : ticket.status || "Pending"}
-                          </span>
+                        
+                        <div className="mt-3 bg-light p-2.5 rounded-3 border-start border-primary border-3">
+                          <p className="text-secondary small mb-0 text-truncate">
+                            <strong>Latest Message:</strong> {ticket.messages && ticket.messages.length > 0 ? ticket.messages[ticket.messages.length - 1].message : "No message logs."}
+                          </p>
                         </div>
-                      </div>
-                      
-                      <div className="mt-3 bg-light p-2.5 rounded-3 border-start border-primary border-3">
-                        <p className="text-secondary small mb-0 text-truncate">
-                          <strong>Latest Message:</strong> {ticket.messages && ticket.messages.length > 0 ? ticket.messages[ticket.messages.length - 1].message : "No message logs."}
-                        </p>
-                      </div>
 
-                      {/* Resolved Evaluation Banner */}
-                      {ticket.status === "resolved" && ticket.evaluation && (
-                        <div className="mt-2 pt-2 border-top d-flex align-items-center justify-content-between text-muted small">
-                          <span><strong>Evaluation:</strong> {ticket.evaluation.note}</span>
-                          <span className="text-warning fw-bold">{"★".repeat(ticket.evaluation.rating)}</span>
-                        </div>
-                      )}
-                    </motion.div>
-                  </div>
-                ))}
+                        {ticket.status === "resolved" && ticket.evaluation && (
+                          <div className="mt-3 pt-2 border-top d-flex align-items-center justify-content-between text-muted small flex-wrap gap-2">
+                            <div className="d-flex align-items-center gap-2 flex-wrap">
+                              <span><strong>Evaluation:</strong> {ticket.evaluation.note}</span>
+                              {ticket.evaluation.resolvedBy && (
+                                <span className="badge bg-light text-dark border d-inline-flex align-items-center gap-1 px-2 py-1 rounded-pill">
+                                  {ticket.evaluation.resolvedByPhoto ? (
+                                    <img 
+                                      src={ticket.evaluation.resolvedByPhoto} 
+                                      alt="Resolver" 
+                                      className="rounded-circle object-fit-cover" 
+                                      style={{ width: "16px", height: "16px" }} 
+                                    />
+                                  ) : (
+                                    <span className="bg-secondary text-white rounded-circle d-inline-flex align-items-center justify-content-center" style={{ width: "16px", height: "16px", fontSize: "0.5rem" }}>✓</span>
+                                  )}
+                                  Resolved by: {ticket.evaluation.resolvedBy}
+                                </span>
+                              )}
+                            </div>
+                            <span className="text-warning fw-bold">{"★".repeat(ticket.evaluation.rating || 5)}</span>
+                          </div>
+                        )}
+                      </motion.div>
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -225,7 +378,7 @@ function Requests() {
         </div>
       </div>
 
-      {/* CHAT MODAL */}
+      {/* CHAT MODAL WITH USER PROFILE IN HEADER AND MESSAGES */}
       <AnimatePresence>
         {selectedTicket && (
           <motion.div 
@@ -244,15 +397,27 @@ function Requests() {
                 exit={{ scale: 0.95, y: 20 }}
               >
                 
-                {/* HEADER */}
+                {/* MODAL HEADER: USER PROFILE DISPLAY */}
                 <div className="p-4 bg-primary text-white d-flex justify-content-between align-items-center shadow-sm">
                   <div className="d-flex align-items-center gap-3">
-                    <div className="bg-white text-primary rounded-circle d-flex align-items-center justify-content-center fw-bold fs-5" style={{ width: "42px", height: "42px" }}>
-                      {selectedTicket.userName ? selectedTicket.userName.charAt(0).toUpperCase() : "U"}
-                    </div>
+                    {getUserAvatar(selectedTicket) ? (
+                      <img 
+                        src={getUserAvatar(selectedTicket)} 
+                        alt={getUserDisplayName(selectedTicket)} 
+                        className="rounded-circle border border-2 border-white shadow-sm"
+                        style={{ width: "48px", height: "48px", objectFit: "cover" }}
+                      />
+                    ) : (
+                      <div 
+                        className="bg-white text-primary rounded-circle d-flex align-items-center justify-content-center fw-bold shadow-sm" 
+                        style={{ width: "48px", height: "48px", fontSize: "1.2rem" }}
+                      >
+                        {getUserDisplayName(selectedTicket).charAt(0).toUpperCase()}
+                      </div>
+                    )}
                     <div>
-                      <h5 className="fw-bold mb-0">{selectedTicket.subject}</h5>
-                      <span className="small text-white-50">{selectedTicket.userName} • Open for: {getTimeElapsed(selectedTicket.createdAt)}</span>
+                      <h5 className="fw-bold mb-0">{selectedTicket.subject || "Support Ticket"}</h5>
+                      <span className="small text-white-50">{getUserDisplayName(selectedTicket)} • Open for: {getTimeElapsed(selectedTicket.createdAt)}</span>
                     </div>
                   </div>
                   
@@ -271,15 +436,32 @@ function Requests() {
 
                 {/* RESOLVED BANNER */}
                 {selectedTicket.status === "resolved" && (
-                  <div className="bg-secondary text-white text-center py-2 small fw-bold">
-                    This ticket has been marked as resolved.
+                  <div className="bg-secondary text-white text-center py-2 small fw-bold d-flex align-items-center justify-content-center gap-2">
+                    <span>This ticket has been marked as resolved</span>
+                    {selectedTicket.evaluation?.resolvedBy && (
+                      <span className="badge bg-white text-dark d-inline-flex align-items-center gap-1">
+                        {selectedTicket.evaluation.resolvedByPhoto && (
+                          <img 
+                            src={selectedTicket.evaluation.resolvedByPhoto} 
+                            alt="Resolver Avatar" 
+                            className="rounded-circle object-fit-cover" 
+                            style={{ width: "16px", height: "16px" }}
+                          />
+                        )}
+                        by {selectedTicket.evaluation.resolvedBy}
+                      </span>
+                    )}
                   </div>
                 )}
 
-                {/* CHAT MESSAGES */}
+                {/* CHAT MESSAGES WITH PROFILE AVATARS */}
                 <div className="p-4 flex-grow-1 bg-light overflow-auto d-flex flex-column gap-3" style={{ overflowY: "auto" }}>
                   {selectedTicket.messages?.map((msg, index) => {
                     const isAdminSender = msg.isAdmin || msg.senderId === auth.currentUser?.uid;
+                    const avatarPhoto = isAdminSender 
+                      ? (msg.senderPhoto || currentUserProfile?.photoURL || auth.currentUser?.photoURL)
+                      : getUserAvatar(selectedTicket);
+
                     return (
                       <div 
                         key={index} 
@@ -298,9 +480,29 @@ function Requests() {
                             {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ""}
                           </div>
                         </div>
-                        <span className="text-muted px-1 mt-0.5" style={{ fontSize: '0.65rem' }}>
-                          {isAdminSender ? "You" : selectedTicket.userName}
-                        </span>
+
+                        {/* AVATAR + SENDER NAME BELOW BUBBLE */}
+                        <div className={`d-flex align-items-center gap-1.5 mt-1 px-1 ${isAdminSender ? "flex-row-reverse" : "flex-row"}`}>
+                          {avatarPhoto ? (
+                            <img 
+                              src={avatarPhoto} 
+                              alt="Profile" 
+                              className="rounded-circle object-fit-cover shadow-sm"
+                              style={{ width: "22px", height: "22px" }}
+                            />
+                          ) : (
+                            <div 
+                              className="bg-secondary text-white rounded-circle d-flex align-items-center justify-content-center fw-bold" 
+                              style={{ width: "22px", height: "22px", fontSize: "0.6rem" }}
+                            >
+                              {isAdminSender ? "A" : getUserDisplayName(selectedTicket).charAt(0).toUpperCase()}
+                            </div>
+                          )}
+
+                          <span className="text-muted" style={{ fontSize: '0.65rem' }}>
+                            {isAdminSender ? (msg.senderName || "Support") : getUserDisplayName(selectedTicket)}
+                          </span>
+                        </div>
                       </div>
                     );
                   })}
@@ -312,7 +514,7 @@ function Requests() {
                     <input 
                       type="text" 
                       className="form-control rounded-pill px-4 border" 
-                      placeholder={selectedTicket.status === "resolved" ? "Ticket is resolved..." : `Reply to ${selectedTicket.userName}...`}
+                      placeholder={selectedTicket.status === "resolved" ? "Ticket is resolved..." : `Reply to ${getUserDisplayName(selectedTicket)}...`}
                       value={replyText}
                       onChange={(e) => setReplyText(e.target.value)}
                       disabled={sending || selectedTicket.status === "resolved"}
@@ -333,7 +535,7 @@ function Requests() {
         )}
       </AnimatePresence>
 
-      {/* TICKET EVALUATION / RESOLUTION MODAL */}
+      {/* RESOLUTION MODAL */}
       <AnimatePresence>
         {showCloseModal && (
           <motion.div 

@@ -45,9 +45,26 @@ function Login() {
     }
   }, []);
 
+  // ROLE-BASED ROUTING HANDLER
   const handleRoleRouting = (role) => {
-    if (role === "admin") navigate("/admin");
-    else navigate("/profile");
+    switch (role) {
+      case "admin":
+        navigate("/admin");
+        break;
+      case "admin assistant":
+      case "admin_assistant":
+        navigate("/requests");
+        break;
+      case "student":
+        navigate("/progress");
+        break;
+      case "professor":
+        navigate("/classes");
+        break;
+      default:
+        navigate("/profile");
+        break;
+    }
   };
 
   const handleGoogleLogin = async () => {
@@ -57,7 +74,7 @@ function Login() {
       title: "Google Sign-In",
       message: "Opening Google authentication window...",
       type: "loading",
-      onClose: () => setModal({ ...modal, show: false })
+      onClose: () => setModal((prev) => ({ ...prev, show: false }))
     });
 
     try {
@@ -91,7 +108,7 @@ function Login() {
       setTimeout(() => handleRoleRouting(userRole), 1500);
     } catch (error) {
       if (error.code === "auth/popup-closed-by-user") {
-        setModal({ ...modal, show: false });
+        setModal((prev) => ({ ...prev, show: false }));
       } else {
         setModal({
           show: true,
@@ -146,7 +163,7 @@ function Login() {
     }
   };
 
-  // --- FULLY FUNCTIONAL FORGOT PASSWORD LOGIC ---
+  // FULLY FUNCTIONAL FORGOT PASSWORD LOGIC
   const handleForgotPassword = async (e) => {
     e.preventDefault();
     if (!resetEmail) return;
@@ -323,7 +340,7 @@ function Login() {
                   className={`btn ${modal.type === "error" ? "btn-danger" : modal.type === "loading" ? "btn-light" : "btn-primary"} px-5 rounded-pill fw-bold w-100`} 
                   onClick={() => {
                     if (modal.onClose) modal.onClose();
-                    setModal({ ...modal, show: false });
+                    setModal((prev) => ({ ...prev, show: false }));
                   }}
                 >
                   {modal.type === "error" ? "Try Again" : modal.type === "loading" ? "Cancel" : "Continue"}

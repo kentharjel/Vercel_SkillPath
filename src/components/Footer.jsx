@@ -16,6 +16,30 @@ function Footer() {
   const [chatMessage, setChatMessage] = useState("");
   const [sending, setSending] = useState(false);
 
+  // Helper to format timestamps gracefully
+  const formatTime = (isoString) => {
+    if (!isoString) return "";
+    try {
+      const date = new Date(isoString);
+      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    } catch {
+      return "";
+    }
+  };
+
+  // Helper to resolve user avatar across common profile keys
+  const getUserAvatar = (userData) => {
+    if (!userData) return null;
+    return (
+      userData.photoURL || 
+      userData.profilePic || 
+      userData.profilePicture || 
+      userData.userPhoto || 
+      userData.avatar || 
+      null
+    );
+  };
+
   // 1. Monitor Auth State
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
@@ -25,11 +49,21 @@ function Footer() {
           if (userDoc.exists()) {
             setUser({ uid: currentUser.uid, ...userDoc.data() });
           } else {
-            setUser({ uid: currentUser.uid, fullname: currentUser.displayName || "User", email: currentUser.email });
+            setUser({ 
+              uid: currentUser.uid, 
+              fullname: currentUser.displayName || "User", 
+              email: currentUser.email,
+              photoURL: currentUser.photoURL || null
+            });
           }
         } catch (err) {
           console.error("Error loading user in footer:", err);
-          setUser({ uid: currentUser.uid, fullname: currentUser.displayName || "User", email: currentUser.email });
+          setUser({ 
+            uid: currentUser.uid, 
+            fullname: currentUser.displayName || "User", 
+            email: currentUser.email,
+            photoURL: currentUser.photoURL || null
+          });
         }
       } else {
         setUser(null);
@@ -98,10 +132,12 @@ function Footer() {
     try {
       const ticketId = `TICKET_${Date.now()}`;
       const newTicketRef = doc(db, "tickets", ticketId);
+      const userPhoto = getUserAvatar(user);
 
       const initialMessage = {
         senderId: user.uid,
         senderName: user.fullname || "User",
+        senderPhoto: userPhoto,
         message: cleanMessage,
         timestamp: new Date().toISOString(),
         isAdmin: false
@@ -112,8 +148,9 @@ function Footer() {
         userId: user.uid,
         userName: user.fullname || "User",
         userEmail: user.email || "",
+        userPhoto: userPhoto,
         subject: cleanSubject,
-        status: "pending", // "pending" | "resolved"
+        status: "pending", 
         createdAt: new Date().toISOString(),
         lastUpdatedAt: new Date().toISOString(),
         messages: [initialMessage]
@@ -126,13 +163,13 @@ function Footer() {
       setActiveTicket(newTicket);
       setView("chat");
 
-      // Trigger AI reply only once for this initial first message
       setTimeout(async () => {
         const aiAnswer = await generateAIReply(cleanMessage);
         if (aiAnswer) {
           const aiReply = {
             senderId: "ai-assistant",
             senderName: "Admin AI Support",
+            senderPhoto: null,
             message: aiAnswer,
             timestamp: new Date().toISOString(),
             isAdmin: true
@@ -153,7 +190,7 @@ function Footer() {
     }
   };
 
-  // 5. Direct User Message inside existing ticket (NO AI response here)
+  // 5. Direct User Message inside existing ticket
   const handleSendMessage = async (e) => {
     e.preventDefault();
     const cleanMessage = chatMessage.trim();
@@ -166,6 +203,7 @@ function Footer() {
       const newMsg = {
         senderId: user.uid,
         senderName: user.fullname || "User",
+        senderPhoto: getUserAvatar(user),
         message: cleanMessage,
         timestamp: new Date().toISOString(),
         isAdmin: false
@@ -173,7 +211,7 @@ function Footer() {
 
       await updateDoc(ticketRef, {
         messages: arrayUnion(newMsg),
-        status: "pending", // Re-opens or keeps ticket active for admin
+        status: "pending", 
         lastUpdatedAt: new Date().toISOString()
       });
 
@@ -275,7 +313,7 @@ function Footer() {
             <div className="modal-dialog modal-dialog-centered">
               <motion.div 
                 className="modal-content border-0 shadow-lg rounded-4 overflow-hidden bg-white"
-                style={{ height: "550px", display: "flex", flexDirection: "column" }}
+                style={{ height: "580px", display: "flex", flexDirection: "column" }}
                 initial={{ scale: 0.95, y: 20 }}
                 animate={{ scale: 1, y: 0 }}
                 exit={{ scale: 0.95, y: 20 }}
@@ -302,7 +340,7 @@ function Footer() {
                 </div>
 
                 {/* Body Content */}
-                <div className="p-3 flex-grow-1 bg-light d-flex flex-column gap-3" style={{ overflowY: "auto" }}>
+                <div className="p-3 flex-grow-1 bg-light d-flex flex-column gap-3 overflow-auto">
                   {!user ? (
                     <div className="text-center my-auto p-4">
                       <span className="fs-2">🔒</span>
@@ -417,39 +455,99 @@ function Footer() {
                       </button>
                     </form>
                   ) : (
-                    /* Direct Ticket Chat View */
+                    /* ENHANCED DIRECT TICKET CHAT VIEW */
                     <div className="d-flex flex-column h-100">
-                      <div className="pb-2 border-bottom mb-2">
-                        <span className="badge bg-secondary mb-1" style={{ fontSize: "0.65rem" }}>
-                          Ticket ID: {activeTicket?.id}
+                      {/* Ticket Info Subheader */}
+                      <div className="pb-2 border-bottom mb-2 d-flex align-items-center justify-content-between">
+                        <div>
+                          <span className="badge bg-light text-secondary border mb-1" style={{ fontSize: "0.65rem" }}>
+                            {activeTicket?.id}
+                          </span>
+                          <h6 className="fw-bold mb-0 text-dark">{activeTicket?.subject}</h6>
+                        </div>
+                        <span className={`badge ${
+                          activeTicket?.status === "resolved" ? "bg-secondary" : "bg-primary"
+                        }`} style={{ fontSize: "0.65rem" }}>
+                          {activeTicket?.status || "pending"}
                         </span>
-                        <h6 className="fw-bold mb-0 text-dark">{activeTicket?.subject}</h6>
                       </div>
 
-                      <div className="flex-grow-1 d-flex flex-column gap-2" style={{ overflowY: "auto" }}>
+                      {/* Chat Messages Log */}
+                      <div className="flex-grow-1 d-flex flex-column gap-3 overflow-auto py-1 pe-1">
                         {activeTicket?.messages?.map((msg, idx) => {
-                          const isMe = msg.senderId === user.uid;
+                          const isMe = msg.senderId === user?.uid;
+                          const senderPhoto = isMe 
+                            ? (msg.senderPhoto || getUserAvatar(user))
+                            : (msg.senderPhoto || activeTicket?.resolvedByPhoto || null);
+
                           return (
-                            <div key={idx} className={`d-flex flex-column ${isMe ? "align-items-end" : "align-items-start"}`}>
+                            <div 
+                              key={idx} 
+                              className={`d-flex flex-column ${isMe ? "align-items-end" : "align-items-start"}`}
+                            >
                               <div 
-                                className={`p-2.5 rounded-3 shadow-sm px-3 small ${
-                                  isMe ? "bg-primary text-white rounded-bottom-end-0" : "bg-white text-dark rounded-bottom-start-0 border"
+                                className={`p-2.5 rounded-4 shadow-sm px-3 small ${
+                                  isMe 
+                                    ? "bg-primary text-white rounded-bottom-end-0" 
+                                    : "bg-white text-dark rounded-bottom-start-0 border"
                                 }`}
-                                style={{ maxWidth: "80%" }}
+                                style={{ maxWidth: "82%" }}
                               >
-                                <p className="mb-0 text-break">{msg.message}</p>
+                                <p className="mb-1 text-break">{msg.message}</p>
+                                <div className={`text-end ${isMe ? "text-white-50" : "text-muted"}`} style={{ fontSize: "0.6rem" }}>
+                                  {formatTime(msg.timestamp)}
+                                </div>
                               </div>
-                              <span className="text-muted px-1 mt-0.5" style={{ fontSize: "0.62rem" }}>
-                                {isMe ? "You" : msg.senderName}
-                              </span>
+
+                              {/* PROFILE AVATAR + SENDER NAME BELOW BUBBLE */}
+                              <div className={`d-flex align-items-center gap-1.5 mt-1 px-1 ${isMe ? "flex-row-reverse" : "flex-row"}`}>
+                                {senderPhoto ? (
+                                  <img 
+                                    src={senderPhoto} 
+                                    alt="Avatar" 
+                                    className="rounded-circle object-fit-cover border shadow-sm"
+                                    style={{ width: "20px", height: "20px" }}
+                                  />
+                                ) : (
+                                  <div 
+                                    className={`rounded-circle d-flex align-items-center justify-content-center text-white fw-bold ${
+                                      isMe ? "bg-primary" : "bg-secondary"
+                                    }`} 
+                                    style={{ width: "20px", height: "20px", fontSize: "0.55rem" }}
+                                  >
+                                    {isMe ? "Y" : (msg.senderName ? msg.senderName.charAt(0).toUpperCase() : "A")}
+                                  </div>
+                                )}
+
+                                <span className="text-muted" style={{ fontSize: "0.65rem" }}>
+                                  {isMe ? "You" : (msg.senderName || "Support")}
+                                </span>
+                              </div>
                             </div>
                           );
                         })}
                       </div>
 
-                      {/* Chat Input allowed if ticket is not resolved */}
+                      {/* Resolved Details Banner */}
+                      {activeTicket?.status === "resolved" && activeTicket?.evaluation && (
+                        <div className="bg-white border rounded-3 p-2.5 my-2 shadow-sm text-center">
+                          <div className="d-flex align-items-center justify-content-center gap-1 mb-1">
+                            <span className="text-success fw-bold small">✓ Marked as Resolved</span>
+                            <span className="text-warning small ms-1">
+                              {"★".repeat(activeTicket.evaluation.rating || 5)}
+                            </span>
+                          </div>
+                          {activeTicket.evaluation.note && (
+                            <p className="text-muted mb-0 small fst-italic">
+                              "{activeTicket.evaluation.note}"
+                            </p>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Chat Input or Resolved Notice */}
                       {activeTicket?.status !== "resolved" ? (
-                        <form onSubmit={handleSendMessage} className="d-flex gap-2 pt-2 border-top mt-2">
+                        <form onSubmit={handleSendMessage} className="d-flex gap-2 pt-2 border-top mt-auto">
                           <input 
                             type="text" 
                             required
@@ -469,7 +567,7 @@ function Footer() {
                         </form>
                       ) : (
                         <div className="p-2 bg-light border rounded text-center text-muted small mt-2">
-                          This ticket has been marked as resolved by Admin.
+                          This ticket has been closed and marked as resolved.
                         </div>
                       )}
                     </div>

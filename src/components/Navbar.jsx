@@ -43,20 +43,31 @@ function Navbar() {
           let userData;
           
           if (userDoc.exists()) {
-            userData = { uid: currentUser.uid, ...userDoc.data() };
+            userData = { 
+              uid: currentUser.uid, 
+              photoURL: currentUser.photoURL || null,
+              ...userDoc.data() 
+            };
           } else {
-            userData = { uid: currentUser.uid, fullname: currentUser.displayName || "User", role: "student" };
+            userData = { 
+              uid: currentUser.uid, 
+              fullname: currentUser.displayName || "User", 
+              photoURL: currentUser.photoURL || null,
+              role: "student" 
+            };
           }
           
           setUser(userData);
 
-          // Real-time counter synchronization if authenticated as an administrator
-          if (userData.role === "admin") {
-            // FIX: Pointing to "tickets" collection instead of "requests"
+          // Real-time counter synchronization if authenticated as an administrator or admin assistant
+          if (
+            userData.role === "admin" || 
+            userData.role === "admin assistant" || 
+            userData.role === "admin_assistant"
+          ) {
             unsubscribeRequests = onSnapshot(
               collection(db, "tickets"),
               (snapshot) => {
-                // Filters out resolved tickets so the badge count accurately displays active items
                 const activeTickets = snapshot.docs.filter(doc => doc.data().status !== "resolved");
                 setRequestCount(activeTickets.length);
               },
@@ -66,7 +77,12 @@ function Navbar() {
             );
           }
         } catch (err) {
-          setUser({ uid: currentUser.uid, fullname: currentUser.displayName || "User", role: "student" });
+          setUser({ 
+            uid: currentUser.uid, 
+            fullname: currentUser.displayName || "User", 
+            photoURL: currentUser.photoURL || null,
+            role: "student" 
+          });
         }
       } else {
         setUser(null);
@@ -132,6 +148,11 @@ function Navbar() {
       { label: "About Us", to: "/about" },
       { label: "Profile", to: "/profile" },
     ];
+    if (user.role === "admin assistant" || user.role === "admin_assistant") return [
+      { label: "Requests", to: "/requests", badge: requestCount },
+      { label: "Learning Paths", to: "/learningpaths" },
+      { label: "Profile", to: "/profile" },
+    ];
     if (user.role === "admin") return [
       { label: "Admin Dashboard", to: "/admin" },
       { label: "Requests", to: "/requests", badge: requestCount },
@@ -142,6 +163,9 @@ function Navbar() {
   };
 
   const menuItems = loading ? [] : getMenuItems();
+
+  // Helper to extract uploaded avatar image URL across various standard key formats
+  const userAvatar = user?.profilePicture || user?.photoURL || user?.avatar || user?.imageUrl;
 
   return (
     <>
@@ -161,6 +185,25 @@ function Navbar() {
             height: 2px;
             background: #0d6efd;
             border-radius: 2px;
+          }
+          .nav-avatar-img {
+            width: 32px;
+            height: 32px;
+            object-fit: cover;
+            border-radius: 50%;
+            border: 2px solid #0d6efd;
+          }
+          .nav-avatar-placeholder {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            background-color: #0d6efd;
+            color: #ffffff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 0.85rem;
           }
         `}
       </style>
@@ -232,8 +275,19 @@ function Navbar() {
                     className="d-flex align-items-center gap-3"
                     initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
                   >
-                    <Link to="/profile" className="text-decoration-none fw-bold text-primary small hover-opacity">
-                      👤 {user.fullname}
+                    <Link to="/profile" className="d-flex align-items-center gap-2 text-decoration-none fw-bold text-dark small hover-opacity">
+                      {userAvatar ? (
+                        <img 
+                          src={userAvatar} 
+                          alt={user.fullname || "Profile"} 
+                          className="nav-avatar-img shadow-sm"
+                        />
+                      ) : (
+                        <div className="nav-avatar-placeholder shadow-sm">
+                          {(user.fullname || "U").charAt(0).toUpperCase()}
+                        </div>
+                      )}
+                      <span className="text-primary">{user.fullname}</span>
                     </Link>
                     <button className="btn btn-outline-danger btn-sm px-3 rounded-pill" onClick={handleLogoutClick}>Logout</button>
                   </motion.div>

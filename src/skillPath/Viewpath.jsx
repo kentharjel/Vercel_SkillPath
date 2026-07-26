@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { auth, db } from "../firebase";
+import { supabase } from "../supabase";
 import {
   collection,
   doc,
@@ -37,9 +38,13 @@ function ViewPath() {
   const [activeLessonId, setActiveLessonId] = useState(null);
   const [activeQuizId, setActiveQuizId] = useState(null);
 
-  // --- ADMIN FORM STATES ---
-  const [lessonForm, setLessonForm] = useState({ title: "", description: "", links: [] });
+  // --- FILE PREVIEW MODAL STATE ---
+  const [previewFile, setPreviewFile] = useState(null);
+
+  // --- ADMIN/PROFESSOR FORM STATES ---
+  const [lessonForm, setLessonForm] = useState({ title: "", description: "", links: [], files: [] });
   const [linkInput, setLinkInput] = useState({ title: "", url: "" });
+  const [uploadingFile, setUploadingFile] = useState(false);
   const [selectedLessonForQuiz, setSelectedLessonForQuiz] = useState("");
   const [quizForm, setQuizForm] = useState([
     { question: "", choices: [{ text: "", isCorrect: true }, { text: "", isCorrect: false }] }
@@ -70,13 +75,65 @@ function ViewPath() {
     }
   };
 
-  // Helper helper to parse domain names safely without throwing crashes
+  const getFileIcon = (fileType, fileUrl = "") => {
+    if (fileType?.includes("image") || fileUrl.match(/\.(jpeg|jpg|gif|png|webp)$/i)) return "🖼️";
+    if (fileType?.includes("pdf") || fileUrl.endsWith(".pdf")) return "📄";
+    if (fileType?.includes("video") || fileUrl.match(/\.(mp4|webm|ogg)$/i)) return "🎥";
+    if (fileType?.includes("sheet") || fileType?.includes("excel") || fileUrl.match(/\.(xls|xlsx|csv)$/i)) return "📊";
+    if (fileType?.includes("presentation") || fileUrl.match(/\.(ppt|pptx)$/i)) return "📊";
+    return "📁";
+  };
+
   const getSafeHostname = (url) => {
     try {
       return new URL(url).hostname;
     } catch (e) {
       return "External Link";
     }
+  };
+
+  // --- FILE VIEWER CONTENT HELPER ---
+  const renderFileViewerContent = (file) => {
+    if (!file) return null;
+    const isDoc = file.ext === "doc" || file.ext === "docx" || file.ext === "ppt" || file.ext === "pptx" || 
+                  file.name?.match(/\.(doc|docx|ppt|pptx)$/i);
+    
+    if (file.type?.startsWith("video/") || file.url?.match(/\.(mp4|webm|ogg)$/i)) {
+      return (
+        <video controls className="w-100 rounded-3" style={{ maxHeight: "75vh" }}>
+          <source src={file.url} type={file.type} />
+        </video>
+      );
+    }
+
+    if (file.type?.startsWith("image/") || file.url?.match(/\.(jpeg|jpg|gif|png|webp)$/i)) {
+      return (
+        <div className="text-center">
+          <img src={file.url} alt={file.name} className="img-fluid rounded-3" style={{ maxHeight: "75vh" }} />
+        </div>
+      );
+    }
+
+    if (isDoc) {
+      const googleViewerUrl = `https://docs.google.com/viewer?url=${encodeURIComponent(file.url)}&embedded=true`;
+      return (
+        <iframe 
+          src={googleViewerUrl} 
+          title={file.name} 
+          className="w-100 border-0 rounded-3" 
+          style={{ height: "75vh" }}
+        />
+      );
+    }
+
+    return (
+      <iframe 
+        src={file.url} 
+        title={file.name} 
+        className="w-100 border-0 rounded-3" 
+        style={{ height: "75vh" }}
+      />
+    );
   };
 
   useEffect(() => {
@@ -189,6 +246,62 @@ function ViewPath() {
     if (user && pathId) fetchData();
   }, [pathId, user]);
 
+  // --- SUPABASE STORAGE FILE UPLOADER HANDLER ---
+  const handleFileUpload = async (selectedFiles, isEditMode = false) => {
+    if (!selectedFiles || selectedFiles.length === 0) return;
+    setUploadingFile(true);
+
+    try {
+      const uploadedFiles = [];
+
+      for (const file of selectedFiles) {
+        const fileExt = file.name.split(".").pop();
+        const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
+        const filePath = `learning_paths/${pathId}/${fileName}`;
+
+        const { data: uploadData, error: uploadError } = await supabase.storage
+          .from("avatars")
+          .upload(filePath, file);
+
+        if (uploadError) {
+          console.error("Supabase Upload Error:", uploadError);
+          alert(`Failed to upload ${file.name}`);
+          continue;
+        }
+
+        const { data: publicUrlData } = supabase.storage
+          .from("avatars")
+          .getPublicUrl(filePath);
+
+        uploadedFiles.push({
+          name: file.name,
+          url: publicUrlData.publicUrl,
+          path: filePath,
+          type: file.type,
+          ext: fileExt,
+          size: (file.size / 1024 / 1024).toFixed(2) + " MB"
+        });
+      }
+
+      if (isEditMode) {
+        setEditLessonTarget((prev) => ({
+          ...prev,
+          files: [...(prev.files || []), ...uploadedFiles]
+        }));
+      } else {
+        setLessonForm((prev) => ({
+          ...prev,
+          files: [...(prev.files || []), ...uploadedFiles]
+        }));
+      }
+    } catch (err) {
+      console.error("Upload error:", err);
+      alert("Error uploading file to Supabase Storage.");
+    } finally {
+      setUploadingFile(false);
+    }
+  };
+
   const addLinkToForm = () => {
     if (!linkInput.title || !linkInput.url) return alert("Fill link title and URL");
     setLessonForm({ ...lessonForm, links: [...(lessonForm.links || []), linkInput] });
@@ -197,6 +310,31 @@ function ViewPath() {
 
   const removeLinkFromForm = (idx) => {
     setLessonForm({ ...lessonForm, links: lessonForm.links.filter((_, i) => i !== idx) });
+  };
+
+  const removeFileFromForm = async (idx, isEditMode = false) => {
+    const targetArray = isEditMode ? editLessonTarget.files : lessonForm.files;
+    const fileToRemove = targetArray[idx];
+
+    if (fileToRemove?.path) {
+      try {
+        await supabase.storage.from("avatars").remove([fileToRemove.path]);
+      } catch (err) {
+        console.error("Failed to delete file from Supabase Storage:", err);
+      }
+    }
+
+    if (isEditMode) {
+      setEditLessonTarget({
+        ...editLessonTarget,
+        files: editLessonTarget.files.filter((_, i) => i !== idx)
+      });
+    } else {
+      setLessonForm({
+        ...lessonForm,
+        files: lessonForm.files.filter((_, i) => i !== idx)
+      });
+    }
   };
 
   const addQuestion = () => {
@@ -230,6 +368,7 @@ function ViewPath() {
     newForm[qIndex].choices.forEach((c, i) => (c.isCorrect = i === cIndex));
     setQuizForm(newForm);
   };
+
   const handleAddLesson = async (e) => {
     e.preventDefault();
     if (!lessonForm.title) return alert("Title required");
@@ -237,12 +376,14 @@ function ViewPath() {
       title: lessonForm.title,
       description: lessonForm.description,
       links: lessonForm.links || [],
+      files: lessonForm.files || [],
       createdBy: user.uid,
       createdAt: serverTimestamp()
     });
-    setLessonForm({ title: "", description: "", links: [] });
+    setLessonForm({ title: "", description: "", links: [], files: [] });
     fetchData();
   };
+
   const handleAddQuiz = async () => {
     if (!selectedLessonForQuiz) return alert("Select a lesson first!");
     await addDoc(collection(db, "content", pathId, "quizzes"), {
@@ -256,15 +397,18 @@ function ViewPath() {
     setSelectedLessonForQuiz("");
     fetchData();
   };
+
   const handleUpdateLesson = async () => {
     await updateDoc(doc(db, "content", pathId, "lessons", editLessonTarget.id), {
       title: editLessonTarget.title,
       description: editLessonTarget.description,
-      links: editLessonTarget.links || []
+      links: editLessonTarget.links || [],
+      files: editLessonTarget.files || []
     });
     setEditLessonTarget(null);
     fetchData();
   };
+
   const handleUpdateQuiz = async () => {
     try {
       await updateDoc(doc(db, "content", pathId, "quizzes", editQuizTarget.id), {
@@ -277,8 +421,45 @@ function ViewPath() {
       console.error("Update Quiz Error:", error);
     }
   };
+
   const confirmDelete = async () => {
-    await deleteDoc(doc(db, "content", pathId, getCollectionName(deleteTarget.type), deleteTarget.id));
+    try {
+      if (deleteTarget.type === "lesson") {
+        // 1. Fetch lesson to pull all attached files and purge them from Supabase storage
+        const lessonRef = doc(db, "content", pathId, "lessons", deleteTarget.id);
+        const lessonSnap = await getDoc(lessonRef);
+
+        if (lessonSnap.exists()) {
+          const lessonData = lessonSnap.data();
+          const files = lessonData.files || [];
+
+          for (const file of files) {
+            if (file.path) {
+              const { error: storageError } = await supabase.storage
+                .from("avatars")
+                .remove([file.path]);
+
+              if (storageError) {
+                console.error(`Failed to delete file from storage: ${file.path}`, storageError);
+              }
+            }
+          }
+        }
+
+        // 2. Also remove any attached quiz associated with this lesson to avoid orphaned documents
+        const quizzesSnap = await getDocs(collection(db, "content", pathId, "quizzes"));
+        const attachedQuiz = quizzesSnap.docs.find(q => q.data().lessonId === deleteTarget.id);
+        if (attachedQuiz) {
+          await deleteDoc(doc(db, "content", pathId, "quizzes", attachedQuiz.id));
+        }
+      }
+
+      // 3. Delete the target document from Firestore
+      await deleteDoc(doc(db, "content", pathId, getCollectionName(deleteTarget.type), deleteTarget.id));
+    } catch (err) {
+      console.error("Error executing deletion workflow:", err);
+    }
+
     setDeleteTarget(null);
     fetchData();
   };
@@ -304,7 +485,6 @@ function ViewPath() {
     const userPathRef = doc(db, "users", user.uid, "userPaths", pathId);
     const newAnswers = { ...studentAnswers, [quizId]: { ...studentAnswers[quizId], [qIdx]: cIdx } };
     
-    // FIX: Writes data under BOTH names so that ViewPath and Progress dashboard stay completely aligned!
     await setDoc(userPathRef, { 
       completedQuizzes: newAnswers, 
       studentAnswers: newAnswers 
@@ -334,8 +514,7 @@ function ViewPath() {
     delete newAnswers[quizId];
     setHearts(newHeartCount);
     setStudentAnswers(newAnswers);
-    
-    // FIX: Clears the record across BOTH field names upon quiz resetting
+
     const updateData = {
       completedQuizzes: newAnswers,
       studentAnswers: newAnswers,
@@ -387,6 +566,8 @@ function ViewPath() {
   const activeLesson = lessons.find((l) => l.id === activeLessonId);
   const activeQuiz = quizzes.find((q) => q.id === activeQuizId);
   const progressPercent = lessons.length ? Math.round((completedLessons.length / lessons.length) * 100) : 0;
+  
+  const canManageCurriculum = user?.role === "admin" || user?.role === "professor";
 
   return (
     <div className="bg-light min-vh-100 pb-5">
@@ -419,15 +600,18 @@ function ViewPath() {
             text-decoration: none;
             display: flex;
             align-items: center;
-            padding: 8px 12px;
+            padding: 10px 14px;
             background: #f8f9fa;
-            border-radius: 8px;
-            border: 1px solid #eee;
+            border-radius: 10px;
+            border: 1px solid #dee2e6;
             margin-bottom: 5px;
+            cursor: pointer;
           }
           .resource-link:hover {
             background: #e9ecef;
-            transform: translateX(5px);
+            border-color: #0d6efd;
+            transform: translateY(-2px);
+            box-shadow: 0 0.25rem 0.5rem rgba(0,0,0,0.05);
           }
         `}
       </style>
@@ -462,7 +646,9 @@ function ViewPath() {
             {viewMode === "list" && (
               <div className="d-flex justify-content-between align-items-end">
                 <div>
-                  <span className="badge bg-primary mb-2 text-uppercase">{user?.role === 'admin' ? 'Path Management' : 'Learning Path'}</span>
+                  <span className="badge bg-primary mb-2 text-uppercase">
+                    {canManageCurriculum ? `${user?.role === 'admin' ? 'Admin' : 'Professor'} Path Management` : 'Learning Path'}
+                  </span>
                   <h1 className="fw-bolder mb-1">{path.title}</h1>
                   <p className="text-muted mb-0">{path.description}</p>
                 </div>
@@ -486,20 +672,53 @@ function ViewPath() {
       {isQuizOngoing && <div className="py-4" />}
 
       <div className="container">
-        {user?.role === "admin" ? (
-          /* --- ADMIN SECTION --- */
+        {canManageCurriculum ? (
+          /* --- ADMIN & PROFESSOR SECTION --- */
           <div className="row g-4">
             <div className="col-lg-5">
               <div className="card border-0 shadow-sm p-4 mb-4 rounded-4">
                 <h5 className="fw-bold text-primary mb-3">Add New Lesson</h5>
-                <input className="form-control mb-2" placeholder="Lesson Title" value={lessonForm.title} onChange={e => setLessonForm({ ...lessonForm, title: e.target.value })} />
-                <textarea className="form-control mb-3" rows="3" placeholder="Lesson Content..." value={lessonForm.description} onChange={e => setLessonForm({ ...lessonForm, description: e.target.value })} />
+                <input 
+                  className="form-control mb-2" 
+                  placeholder="Lesson Title" 
+                  value={lessonForm.title} 
+                  onChange={e => setLessonForm({ ...lessonForm, title: e.target.value })} 
+                />
+                <textarea 
+                  className="form-control mb-3" 
+                  rows="3" 
+                  placeholder="Lesson Content..." 
+                  value={lessonForm.description} 
+                  onChange={e => setLessonForm({ ...lessonForm, description: e.target.value })} 
+                />
 
                 <div className="bg-light p-3 rounded-3 mb-3 border">
-                  <label className="small fw-bold mb-2">ATTACH RESOURCES (Optional)</label>
+                  <label className="small fw-bold mb-2">ATTACH DOCUMENTS / IMAGES / MEDIA</label>
+                  <input 
+                    type="file" 
+                    multiple
+                    className="form-control form-control-sm mb-2" 
+                    accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,video/*"
+                    onChange={(e) => handleFileUpload(e.target.files, false)}
+                    disabled={uploadingFile}
+                  />
+                  {uploadingFile && <div className="text-muted small mb-2">Uploading attachments...</div>}
+                  
+                  <div className="d-flex flex-wrap gap-2 mb-2">
+                    {lessonForm.files?.map((file, i) => (
+                      <span key={i} className="badge bg-white text-dark border p-2 d-flex align-items-center gap-1 shadow-sm" style={{ cursor: 'pointer' }} onClick={() => setPreviewFile(file)}>
+                        {getFileIcon(file.type, file.url)} <span className="text-truncate" style={{ maxWidth: "120px" }}>{file.name}</span>
+                        <button className="btn-close ms-2" style={{ fontSize: '8px' }} onClick={(e) => { e.stopPropagation(); removeFileFromForm(i, false); }}></button>
+                      </span>
+                    ))}
+                  </div>
+
+                  <hr className="my-2" />
+
+                  <label className="small fw-bold mb-2">ATTACH EXTERNAL LINKS</label>
                   <div className="input-group input-group-sm mb-2">
                     <input className="form-control" placeholder="Link Title (e.g. Tutorial)" value={linkInput.title} onChange={e => setLinkInput({ ...linkInput, title: e.target.value })} />
-                    <input className="form-control" placeholder="URL (Youtube, Github, etc)" value={linkInput.url} onChange={e => setLinkInput({ ...linkInput, url: e.target.value })} />
+                    <input className="form-control" placeholder="URL" value={linkInput.url} onChange={e => setLinkInput({ ...linkInput, url: e.target.value })} />
                     <button className="btn btn-dark" onClick={addLinkToForm}>Add</button>
                   </div>
                   <div className="d-flex flex-wrap gap-2">
@@ -512,9 +731,12 @@ function ViewPath() {
                   </div>
                 </div>
 
-                <button className="btn btn-primary w-100 fw-bold" onClick={handleAddLesson}>Create Lesson</button>
+                <button className="btn btn-primary w-100 fw-bold" onClick={handleAddLesson} disabled={uploadingFile}>
+                  Create Lesson
+                </button>
               </div>
 
+              {/* QUIZ CREATION FORM */}
               <div className="card border-0 shadow-sm p-4 rounded-4">
                 <h5 className="fw-bold text-primary mb-3">Create Quiz</h5>
                 <label className="small fw-bold text-muted mb-1">SELECT LESSON TO ATTACH</label>
@@ -553,7 +775,7 @@ function ViewPath() {
 
             <div className="col-lg-7">
               <h5 className="fw-bold mb-3">Curriculum Preview</h5>
-              {lessons.map((l, idx) => {
+              {lessons.map((l) => {
                 const attachedQuiz = quizzes.find(q => q.lessonId === l.id);
                 return (
                   <div key={l.id} className="card border-0 shadow-sm mb-4 rounded-4 overflow-hidden">
@@ -568,6 +790,16 @@ function ViewPath() {
                         </div>
                       </div>
                       <p className="text-muted small text-truncate" style={{ maxWidth: "400px" }}>{l.description}</p>
+
+                      {l.files?.length > 0 && (
+                        <div className="mb-2 d-flex flex-wrap gap-1">
+                          {l.files.map((file, fi) => (
+                            <span key={fi} className="badge bg-light text-dark border small text-decoration-none p-2" style={{ cursor: 'pointer' }} onClick={() => setPreviewFile(file)}>
+                              {getFileIcon(file.type, file.url)} {file.name}
+                            </span>
+                          ))}
+                        </div>
+                      )}
 
                       {l.links?.length > 0 && (
                         <div className="mb-3">
@@ -610,7 +842,7 @@ function ViewPath() {
               {viewMode === "list" && (
                 <div>
                   <h4 className="fw-bold mb-4 text-secondary">Course Curriculum</h4>
-                  {lessons.map((lesson, idx) => {
+                  {lessons.map((lesson) => {
                     const isCompleted = completedLessons.includes(lesson.id);
                     const lessonQuiz = quizzes.find(q => q.lessonId === lesson.id);
                     const quizDone = isQuizPerfect(lessonQuiz);
@@ -667,9 +899,30 @@ function ViewPath() {
                     {activeLesson.description}
                   </div>
 
+                  {/* LESSON FILES & ATTACHMENTS (Clicking card opens modal preview) */}
+                  {activeLesson.files?.length > 0 && (
+                    <div className="mb-4">
+                      <h6 className="fw-bold text-muted mb-3">ATTACHED FILES & RESOURCES (CLICK TO VIEW)</h6>
+                      <div className="row g-2">
+                        {activeLesson.files.map((file, fi) => (
+                          <div key={fi} className="col-md-6">
+                            <div className="resource-link" onClick={() => setPreviewFile(file)}>
+                              <span className="me-2 fs-5 d-flex align-items-center">{getFileIcon(file.type, file.url)}</span>
+                              <div className="text-truncate flex-grow-1">
+                                <div className="fw-bold text-dark small text-truncate">{file.name}</div>
+                                <div className="text-muted" style={{ fontSize: '10px' }}>{file.size || "Attachment"} • Click to view</div>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* HELPFUL LINKS */}
                   {activeLesson.links?.length > 0 && (
                     <div className="mb-5">
-                      <h6 className="fw-bold text-muted mb-3">HELPFUL RESOURCES</h6>
+                      <h6 className="fw-bold text-muted mb-3">HELPFUL LINKS</h6>
                       <div className="row g-2">
                         {activeLesson.links.map((link, li) => (
                           <div key={li} className="col-md-6">
@@ -755,6 +1008,35 @@ function ViewPath() {
         )}
       </div>
 
+      {/* --- FILE PREVIEW MODAL (SCROLLABLE CONTENT & STICKY CONTROLS) --- */}
+      {previewFile && (
+        <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.8)", zIndex: 1050 }}>
+          <div className="modal-dialog modal-dialog-centered modal-xl" style={{ height: '90vh' }}>
+            <div className="modal-content border-0 rounded-4 shadow h-100 bg-dark text-white d-flex flex-column overflow-hidden">
+              <div className="modal-header border-secondary px-4 py-3 flex-shrink-0">
+                <div className="d-flex align-items-center gap-2 text-truncate">
+                  <span className="fs-4">{getFileIcon(previewFile.type, previewFile.url)}</span>
+                  <h5 className="fw-bold mb-0 text-truncate">{previewFile.name}</h5>
+                </div>
+                <div className="d-flex gap-2 align-items-center">
+                  <a href={previewFile.url} target="_blank" rel="noopener noreferrer" className="btn btn-sm btn-outline-light">
+                    Open in New Tab ↗
+                  </a>
+                  <button type="button" className="btn-close btn-close-white" onClick={() => setPreviewFile(null)}></button>
+                </div>
+              </div>
+              <div className="modal-body p-0 flex-grow-1 bg-black overflow-y-auto" style={{ minHeight: '60vh' }}>
+                {renderFileViewerContent(previewFile)}
+              </div>
+              <div className="modal-footer border-secondary px-4 py-2 justify-content-between flex-shrink-0">
+                <span className="text-muted small">{previewFile.size || "File Attachment"}</span>
+                <button type="button" className="btn btn-secondary btn-sm px-4 rounded-pill" onClick={() => setPreviewFile(null)}>Close Preview</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* --- HEART STATUS MODAL (STUDENT ONLY) --- */}
       {showHeartModal && user?.role === "student" && (
         <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)" }}>
@@ -788,9 +1070,9 @@ function ViewPath() {
         </div>
       )}
 
-      {/* --- ADMIN MODALS --- */}
+      {/* --- ADMIN / PROFESSOR EDIT LESSON MODAL --- */}
       {editLessonTarget && (
-        <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.5)" }}>
+        <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.5)", overflowY: "auto" }}>
           <div className="modal-dialog modal-dialog-centered">
             <div className="modal-content border-0 rounded-4 shadow">
               <div className="modal-body p-4">
@@ -799,6 +1081,26 @@ function ViewPath() {
                 <textarea className="form-control mb-3" rows="5" value={editLessonTarget.description} onChange={e => setEditLessonTarget({ ...editLessonTarget, description: e.target.value })} />
 
                 <div className="bg-light p-3 rounded-3 mb-3 border">
+                  <label className="small fw-bold mb-2">UPDATE ATTACHMENTS / FILES</label>
+                  <input 
+                    type="file" 
+                    multiple
+                    className="form-control form-control-sm mb-2" 
+                    accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,video/*"
+                    onChange={(e) => handleFileUpload(e.target.files, true)}
+                    disabled={uploadingFile}
+                  />
+                  <div className="d-flex flex-wrap gap-2 mb-2">
+                    {editLessonTarget.files?.map((file, i) => (
+                      <span key={i} className="badge bg-white text-dark border p-2 d-flex align-items-center gap-1 shadow-sm" style={{ cursor: 'pointer' }} onClick={() => setPreviewFile(file)}>
+                        {getFileIcon(file.type, file.url)} <span className="text-truncate" style={{ maxWidth: "100px" }}>{file.name}</span>
+                        <button className="btn-close ms-2" style={{ fontSize: '8px' }} onClick={(e) => { e.stopPropagation(); removeFileFromForm(i, true); }}></button>
+                      </span>
+                    ))}
+                  </div>
+
+                  <hr className="my-2" />
+
                   <label className="small fw-bold mb-2">UPDATE LINKS</label>
                   <div className="input-group input-group-sm mb-2">
                     <input className="form-control" placeholder="Title" value={linkInput.title} onChange={e => setLinkInput({ ...linkInput, title: e.target.value })} />
@@ -820,7 +1122,7 @@ function ViewPath() {
                 </div>
 
                 <div className="d-flex gap-2">
-                  <button className="btn btn-primary w-100" onClick={handleUpdateLesson}>Update</button>
+                  <button className="btn btn-primary w-100" onClick={handleUpdateLesson} disabled={uploadingFile}>Update</button>
                   <button className="btn btn-light w-100" onClick={() => setEditLessonTarget(null)}>Cancel</button>
                 </div>
               </div>
@@ -829,6 +1131,7 @@ function ViewPath() {
         </div>
       )}
 
+      {/* --- EDIT QUIZ MODAL --- */}
       {editQuizTarget && (
         <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)", overflowY: "auto" }}>
           <div className="modal-dialog modal-lg modal-dialog-centered">
@@ -871,6 +1174,7 @@ function ViewPath() {
         </div>
       )}
 
+      {/* --- DELETE CONFIRMATION MODAL --- */}
       {deleteTarget && (
         <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.5)" }}>
           <div className="modal-dialog modal-dialog-centered modal-sm">

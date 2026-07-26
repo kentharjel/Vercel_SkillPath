@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { auth, db } from "../firebase";
+import { supabase } from "../supabase"; // Make sure path points to your supabase.js
 import { onAuthStateChanged } from "firebase/auth";
 import { doc, getDoc, updateDoc, collection, getDocs, query, where } from "firebase/firestore";
 import { motion, AnimatePresence } from "framer-motion";
@@ -9,6 +10,8 @@ function Profile() {
   const [loading, setLoading] = useState(true);
   const [isEditing, setIsEditing] = useState(false);
   const [newName, setNewName] = useState("");
+  const [imageFile, setImageFile] = useState(null);
+  const [imagePreview, setImagePreview] = useState(null);
   const [saving, setSaving] = useState(false);
   
   // Real stats counter logic matching your collections
@@ -31,6 +34,7 @@ function Profile() {
             fullname: currentUser.displayName || "User",
             role: "student",
             email: currentUser.email,
+            photoURL: currentUser.photoURL || null,
           };
 
           if (userSnap.exists()) {
@@ -81,18 +85,65 @@ function Profile() {
     return () => unsubscribe();
   }, []);
 
-  const handleSaveName = async (e) => {
+  // Preview local image selection before saving
+  const handleImageChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setImageFile(file);
+      setImagePreview(URL.createObjectURL(file));
+    }
+  };
+
+  const handleSaveProfile = async (e) => {
     e.preventDefault();
     if (!newName.trim() || !user) return;
     setSaving(true);
+
     try {
+      let finalPhotoUrl = user.photoURL || null;
+
+      // 1. If user selected a new file, upload to Supabase Storage
+      if (imageFile) {
+        const fileExt = imageFile.name.split('.').pop();
+        // File path scoped by user UID so Supabase knows who owns the file
+        const filePath = `${user.uid}/avatar_${Date.now()}.${fileExt}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from("avatars") // Bucket name in Supabase
+          .upload(filePath, imageFile, { upsert: true });
+
+        if (uploadError) throw uploadError;
+
+        // Get public URL
+        const { data: publicUrlData } = supabase.storage
+          .from("avatars")
+          .getPublicUrl(filePath);
+
+        finalPhotoUrl = publicUrlData.publicUrl;
+      }
+
+      // 2. Update Firestore user profile
       const userDocRef = doc(db, "users", user.uid);
-      await updateDoc(userDocRef, { fullname: newName });
-      
-      setUser((prev) => ({ ...prev, fullname: newName }));
+      const updatedData = {
+        fullname: newName,
+        photoURL: finalPhotoUrl,
+      };
+
+      await updateDoc(userDocRef, updatedData);
+
+      // Update state locally
+      setUser((prev) => ({
+        ...prev,
+        fullname: newName,
+        photoURL: finalPhotoUrl,
+      }));
+
       setIsEditing(false);
+      setImageFile(null);
+      setImagePreview(null);
     } catch (error) {
-      console.error("Error saving display name update:", error);
+      console.error("Error updating profile:", error.message);
+      alert("Failed to update profile: " + error.message);
     } finally {
       setSaving(false);
     }
@@ -135,18 +186,27 @@ function Profile() {
               </div>
               
               <div className="card-body px-4 pb-4 pt-0 position-relative">
-                {/* Floating Initials Avatar Block */}
+                {/* Floating Avatar Block */}
                 <div className="position-absolute" style={{ top: "-60px", left: "24px" }}>
                   <div className="bg-white rounded-circle p-1 shadow-sm">
-                    <div className="bg-primary bg-gradient rounded-circle text-white d-flex align-items-center justify-content-center fw-bold fs-1" style={{ width: "110px", height: "110px" }}>
-                      {user.fullname.charAt(0).toUpperCase()}
-                    </div>
+                    {user.photoURL ? (
+                      <img 
+                        src={user.photoURL} 
+                        alt={user.fullname} 
+                        className="rounded-circle object-fit-cover" 
+                        style={{ width: "110px", height: "110px" }}
+                      />
+                    ) : (
+                      <div className="bg-primary bg-gradient rounded-circle text-white d-flex align-items-center justify-content-center fw-bold fs-1" style={{ width: "110px", height: "110px" }}>
+                        {user.fullname.charAt(0).toUpperCase()}
+                      </div>
+                    )}
                   </div>
                 </div>
 
                 <div className="d-flex justify-content-end pt-3 mb-4">
                   <button className="btn btn-outline-primary btn-sm px-4 rounded-pill fw-bold" onClick={() => setIsEditing(true)}>
-                    Edit Name
+                    Edit Profile
                   </button>
                 </div>
 
@@ -189,7 +249,7 @@ function Profile() {
         </div>
       </div>
 
-      {/* PREMIUM MODAL POPUP FOR NAME ALTERATION ONLY */}
+      {/* PREMIUM MODAL POPUP FOR PROFILE EDITING */}
       <AnimatePresence>
         {isEditing && (
           <motion.div 
@@ -206,11 +266,37 @@ function Profile() {
                 animate={{ scale: 1, y: 0 }}
                 exit={{ scale: 0.95, y: 15 }}
               >
-                <form onSubmit={handleSaveName}>
+                <form onSubmit={handleSaveProfile}>
                   <div className="modal-header border-0 pb-0 pt-4 px-4">
-                    <h5 className="fw-bold m-0">Edit Name</h5>
+                    <h5 className="fw-bold m-0">Edit Profile</h5>
                   </div>
+
                   <div className="modal-body p-4">
+                    {/* Avatar Preview and File Input */}
+                    <div className="text-center mb-4">
+                      <div className="position-relative d-inline-block">
+                        <img 
+                          src={imagePreview || user.photoURL || `https://via.placeholder.com/100?text=${user.fullname.charAt(0)}`} 
+                          alt="Preview" 
+                          className="rounded-circle object-fit-cover shadow-sm mb-2" 
+                          style={{ width: "100px", height: "100px" }}
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="avatarInput" className="btn btn-sm btn-outline-secondary rounded-pill px-3 fw-bold mt-1">
+                          Choose New Photo
+                        </label>
+                        <input 
+                          type="file" 
+                          id="avatarInput" 
+                          accept="image/*" 
+                          className="d-none" 
+                          onChange={handleImageChange}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Display Name Input */}
                     <div className="mb-0">
                       <label className="form-label small fw-bold text-muted">Display Name</label>
                       <input 
@@ -219,12 +305,21 @@ function Profile() {
                         className="form-control rounded-3" 
                         value={newName} 
                         onChange={(e) => setNewName(e.target.value)}
-                        autoFocus
                       />
                     </div>
                   </div>
+
                   <div className="modal-footer border-0 pt-0 pb-4 px-4 gap-2">
-                    <button type="button" className="btn btn-light px-4 rounded-pill fw-bold" onClick={() => { setIsEditing(false); setNewName(user.fullname); }}>
+                    <button 
+                      type="button" 
+                      className="btn btn-light px-4 rounded-pill fw-bold" 
+                      onClick={() => { 
+                        setIsEditing(false); 
+                        setNewName(user.fullname); 
+                        setImagePreview(null);
+                        setImageFile(null);
+                      }}
+                    >
                       Cancel
                     </button>
                     <button type="submit" disabled={saving} className="btn btn-primary px-4 rounded-pill fw-bold">
