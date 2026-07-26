@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { auth, db } from "../firebase";
-import { supabase } from "../supabase"; // Make sure path points to your supabase.js
+import { supabase } from "../supabase";
 import { onAuthStateChanged } from "firebase/auth";
 import { doc, getDoc, updateDoc, collection, getDocs, query, where } from "firebase/firestore";
 import { motion, AnimatePresence } from "framer-motion";
@@ -14,7 +14,6 @@ function Profile() {
   const [imagePreview, setImagePreview] = useState(null);
   const [saving, setSaving] = useState(false);
   
-  // Real stats counter logic matching your collections
   const [profileStats, setProfileStats] = useState({
     lessonsCount: 0,
     pathsCount: 0,
@@ -25,7 +24,6 @@ function Profile() {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
         try {
-          // 1. Fetch primary profile records
           const userDocRef = doc(db, "users", currentUser.uid);
           const userSnap = await getDoc(userDocRef);
           
@@ -44,7 +42,6 @@ function Profile() {
           setUser(userData);
           setNewName(userData.fullname);
 
-          // 2. Load metric values depending on specific user configuration
           let lessons = 0;
           let paths = 0;
           let classes = 0;
@@ -64,6 +61,10 @@ function Profile() {
           } else if (userData.role === "professor") {
             const classesQuery = query(collection(db, "classes"), where("professorId", "==", currentUser.uid));
             const classesSnap = await getDocs(classesQuery);
+            classes = classesSnap.size;
+
+          } else if (userData.role === "admin assistant") {
+            const classesSnap = await getDocs(collection(db, "classes"));
             classes = classesSnap.size;
           }
 
@@ -85,7 +86,6 @@ function Profile() {
     return () => unsubscribe();
   }, []);
 
-  // Preview local image selection before saving
   const handleImageChange = (e) => {
     const file = e.target.files[0];
     if (file) {
@@ -102,19 +102,16 @@ function Profile() {
     try {
       let finalPhotoUrl = user.photoURL || null;
 
-      // 1. If user selected a new file, upload to Supabase Storage
       if (imageFile) {
         const fileExt = imageFile.name.split('.').pop();
-        // File path scoped by user UID so Supabase knows who owns the file
         const filePath = `${user.uid}/avatar_${Date.now()}.${fileExt}`;
 
         const { error: uploadError } = await supabase.storage
-          .from("avatars") // Bucket name in Supabase
+          .from("avatars")
           .upload(filePath, imageFile, { upsert: true });
 
         if (uploadError) throw uploadError;
 
-        // Get public URL
         const { data: publicUrlData } = supabase.storage
           .from("avatars")
           .getPublicUrl(filePath);
@@ -122,7 +119,6 @@ function Profile() {
         finalPhotoUrl = publicUrlData.publicUrl;
       }
 
-      // 2. Update Firestore user profile
       const userDocRef = doc(db, "users", user.uid);
       const updatedData = {
         fullname: newName,
@@ -131,7 +127,6 @@ function Profile() {
 
       await updateDoc(userDocRef, updatedData);
 
-      // Update state locally
       setUser((prev) => ({
         ...prev,
         fullname: newName,
@@ -186,7 +181,6 @@ function Profile() {
               </div>
               
               <div className="card-body px-4 pb-4 pt-0 position-relative">
-                {/* Floating Avatar Block */}
                 <div className="position-absolute" style={{ top: "-60px", left: "24px" }}>
                   <div className="bg-white rounded-circle p-1 shadow-sm">
                     {user.photoURL ? (
@@ -210,7 +204,6 @@ function Profile() {
                   </button>
                 </div>
 
-                {/* Account details */}
                 <div className="pt-3">
                   <h3 className="fw-bold text-dark mb-1">{user.fullname}</h3>
                   <p className="text-muted small mb-0">@{user.email?.split("@")[0]} • {user.email}</p>
@@ -218,7 +211,7 @@ function Profile() {
               </div>
             </motion.div>
 
-            {/* HIGH-QUALITY WIDGET STATS SYSTEM GRID */}
+            {/* WIDGET STATS GRID */}
             <div className="row g-4">
               {user.role === "student" && (
                 <>
@@ -236,11 +229,19 @@ function Profile() {
                 </>
               )}
 
+              {user.role === "admin assistant" && (
+                <>
+                  <StatWidgetCard title="System Control" value="Semi-Full Access" icon="⚙️" description="Elevated operational tools active" />
+                  <StatWidgetCard title="Cluster Status" value="Online" icon="⚡" description="Connected to Firestore cluster" />
+                  <StatWidgetCard title="Security Group" value="Level-1" icon="🔑" description="Secondary assistant credentials" />
+                </>
+              )}
+
               {user.role === "admin" && (
                 <>
                   <StatWidgetCard title="System Control" value="Full Access" icon="⚙️" description="Global platform rules active" />
                   <StatWidgetCard title="Cluster Status" value="Online" icon="⚡" description="Connected to Firestore cluster" />
-                  <StatWidgetCard title="Security Group" value="Level-1" icon="🔑" description="Primary root credentials" />
+                  <StatWidgetCard title="Security Group" value="Level-2" icon="🔑" description="Primary root credentials" />
                 </>
               )}
             </div>
@@ -249,7 +250,7 @@ function Profile() {
         </div>
       </div>
 
-      {/* PREMIUM MODAL POPUP FOR PROFILE EDITING */}
+      {/* EDIT PROFILE MODAL */}
       <AnimatePresence>
         {isEditing && (
           <motion.div 
@@ -272,7 +273,6 @@ function Profile() {
                   </div>
 
                   <div className="modal-body p-4">
-                    {/* Avatar Preview and File Input */}
                     <div className="text-center mb-4">
                       <div className="position-relative d-inline-block">
                         <img 
@@ -296,7 +296,6 @@ function Profile() {
                       </div>
                     </div>
 
-                    {/* Display Name Input */}
                     <div className="mb-0">
                       <label className="form-label small fw-bold text-muted">Display Name</label>
                       <input 

@@ -42,6 +42,12 @@ function LearningPaths() {
     setModal({ show: true, title, message, isConfirm: true, onConfirm });
   };
 
+  // Helper to check if user has management privileges (Admin or Admin Assistant with space/underscore support)
+  const canManage = 
+    user?.role === "admin" || 
+    user?.role === "admin assistant" || 
+    user?.role === "admin_assistant";
+
   // FETCH USER & APPLIED PATHS
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged(async (currentUser) => {
@@ -92,7 +98,7 @@ function LearningPaths() {
     fetchPaths();
   }, []);
 
-  // ADD PATH (Admin)
+  // ADD PATH (Admin / Admin Assistant)
   const handleAddPath = async (e) => {
     e.preventDefault();
     if (!form.title || !form.description) {
@@ -109,12 +115,13 @@ function LearningPaths() {
 
     setForm({ title: "", level: "Beginner", description: "" });
     showAlert("Success!", "The learning path has been published.");
+    
     // Re-fetch instead of reload for better UX
     const snap = await getDocs(collection(db, "content"));
     setPaths(snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(d => d.type === "learning_path"));
   };
 
-  // DELETE PATH (Admin)
+  // DELETE PATH (Admin / Admin Assistant)
   const handleDeletePath = async (id) => {
     showConfirm(
       "Delete Path",
@@ -172,8 +179,8 @@ function LearningPaths() {
 
       <div className="container py-5">
         <div className="row g-5">
-          {/* ADMIN FORM */}
-          {user?.role === "admin" && (
+          {/* ADMIN / ADMIN ASSISTANT FORM */}
+          {canManage && (
             <div className="col-lg-4">
               <div className="card shadow-sm border-0 rounded-4 sticky-top" style={{ top: "20px" }}>
                 <div className="card-body p-4">
@@ -225,7 +232,7 @@ function LearningPaths() {
           )}
 
           {/* LIST */}
-          <div className={user?.role === "admin" ? "col-lg-8" : "col-12"}>
+          <div className={canManage ? "col-lg-8" : "col-12"}>
             <div className="d-flex justify-content-between align-items-center mb-4">
               <h3 className="fw-bold m-0 text-dark">Available Paths</h3>
               <span className="badge bg-white text-dark border shadow-sm px-3 py-2 rounded-pill">
@@ -236,7 +243,7 @@ function LearningPaths() {
             <div className="row g-4">
               {paths.length > 0 ? (
                 paths.map((path) => (
-                  <div key={path.id} className={user?.role === "admin" ? "col-md-6" : "col-md-4"}>
+                  <div key={path.id} className={canManage ? "col-md-6" : "col-md-4"}>
                     <div className="card h-100 border-0 shadow-sm rounded-4 hover-shadow transition">
                       <div className="card-body p-4 d-flex flex-column">
                         <div className="mb-3">
@@ -259,7 +266,7 @@ function LearningPaths() {
                         </p>
 
                         <div className="mt-auto pt-4 border-top">
-                          {user?.role === "admin" && (
+                          {canManage && (
                             <div className="d-flex gap-2">
                               <button
                                 className="btn btn-sm btn-light text-danger fw-bold flex-grow-1"

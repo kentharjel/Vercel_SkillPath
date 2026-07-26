@@ -45,6 +45,18 @@ function ViewClass() {
     { questionText: "", options: ["", "", "", ""], correctAnswer: 0 }
   ]);
 
+  // AI Quiz Generator States
+  const [showAiQuizModal, setShowAiQuizModal] = useState(false);
+  const [aiQuizTitle, setAiQuizTitle] = useState("");
+  const [aiSourceType, setAiSourceType] = useState("lesson"); // "lesson" or "custom"
+  const [selectedLessonId, setSelectedLessonId] = useState("");
+  const [customPrompt, setCustomPrompt] = useState("");
+  const [aiFiles, setAiFiles] = useState([]);
+  const [aiDifficulty, setAiDifficulty] = useState("Medium");
+  const [aiNumQuestions, setAiNumQuestions] = useState(5);
+  const [generatingAi, setGeneratingAi] = useState(false);
+  const [aiSuccessModal, setAiSuccessModal] = useState(false);
+
   // Modal for lesson/quiz deletion
   const [deleteModal, setDeleteModal] = useState({ show: false, id: null, title: "", attachments: [] });
 
@@ -252,6 +264,162 @@ function ViewClass() {
     fetchClassDetails(user);
   };
 
+  const handleGenerateAiQuiz = async (e) => {
+    e.preventDefault();
+    setGeneratingAi(true);
+
+    try {
+      let sourceText = "";
+      let fileParts = [];
+
+      const supportedTypes = ["application/pdf", "image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"];
+
+      if (aiSourceType === "lesson") {
+        const selectedLesson = classContent.find(c => c.id === selectedLessonId);
+        if (!selectedLesson) {
+          alert("Please select a valid lesson source.");
+          setGeneratingAi(false);
+          return;
+        }
+        sourceText = `Lesson Title: ${selectedLesson.title}\nContent: ${selectedLesson.content || ""}`;
+        if (selectedLesson.attachments && selectedLesson.attachments.length > 0) {
+          for (const att of selectedLesson.attachments) {
+            const isSupported = supportedTypes.includes(att.type) || 
+              ['pdf', 'jpg', 'jpeg', 'png', 'webp'].includes(att.ext?.toLowerCase());
+
+            if (!isSupported) {
+              console.warn(`Skipping unsupported file type for AI processing: ${att.name}`);
+              continue;
+            }
+
+            try {
+              const res = await fetch(att.url);
+              const blob = await res.blob();
+              const base64Data = await new Promise((resolve) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result.split(",")[1]);
+                reader.readAsDataURL(blob);
+              });
+              fileParts.push({
+                inlineData: {
+                  data: base64Data,
+                  mimeType: att.type || "application/octet-stream"
+                }
+              });
+            } catch (err) {
+              console.error("Failed to fetch attachment for AI analysis:", err);
+            }
+          }
+        }
+      } else {
+        sourceText = customPrompt;
+        if (aiFiles && aiFiles.length > 0) {
+          for (const file of aiFiles) {
+            const isSupported = supportedTypes.includes(file.type) || 
+              ['pdf', 'jpg', 'jpeg', 'png', 'webp'].includes(file.name.split(".").pop()?.toLowerCase());
+
+            if (!isSupported) {
+              console.warn(`Skipping unsupported custom file: ${file.name}`);
+              continue;
+            }
+
+            const base64Data = await new Promise((resolve) => {
+              const reader = new FileReader();
+              reader.onloadend = () => resolve(reader.result.split(",")[1]);
+              reader.readAsDataURL(file);
+            });
+            fileParts.push({
+              inlineData: {
+                data: base64Data,
+                mimeType: file.type
+              }
+            });
+          }
+        }
+      }
+
+      const promptPayload = [
+        {
+          text: `You are an expert AI quiz creator for an educational platform. Based on the provided source material, generate a quiz with exactly ${aiNumQuestions} multiple-choice questions at a ${aiDifficulty} difficulty level.
+          
+          Return ONLY a valid JSON object in the following format without any markdown code block formatting:
+          {
+            "quizTitle": "Generated Quiz Title",
+            "questions": [
+              {
+                "questionText": "Question string here?",
+                "options": ["Option 1", "Option 2", "Option 3", "Option 4"],
+                "correctAnswer": 0
+              }
+            ]
+          }
+          where correctAnswer is the zero-based index (0 to 3) of the correct option.
+          
+          Source Material:
+          ${sourceText}`
+        },
+        ...fileParts
+      ];
+
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${apiKey}`;
+
+      let response;
+      let retries = 3;
+      let delay = 2000;
+
+      while (retries > 0) {
+        response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ contents: [{ parts: promptPayload }] })
+        });
+
+        if (response.status === 429) {
+          retries--;
+          await new Promise(res => setTimeout(res, delay));
+          delay *= 2;
+        } else {
+          break;
+        }
+      }
+
+      if (!response.ok) {
+        throw new Error(`Gemini API Error: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (!rawText) throw new Error("No response received from Gemini API.");
+
+      const cleanedJson = rawText.replace(/```json/g, "").replace(/```/g, "").trim();
+      const parsedQuiz = JSON.parse(cleanedJson);
+
+      const finalTitle = aiQuizTitle.trim() !== "" ? aiQuizTitle : (parsedQuiz.quizTitle || "AI Generated Quiz");
+
+      await addDoc(collection(db, `classes/${classId}/content`), {
+        title: finalTitle,
+        questions: parsedQuiz.questions,
+        type: "quiz",
+        createdAt: serverTimestamp()
+      });
+
+      setShowAiQuizModal(false);
+      setSelectedLessonId("");
+      setCustomPrompt("");
+      setAiFiles([]);
+      setAiQuizTitle("");
+      fetchClassDetails(user);
+      setAiSuccessModal(true);
+    } catch (err) {
+      console.error("AI Quiz Generation Failed:", err);
+      alert("Failed to generate AI quiz. Please check your API key or source content and try again.");
+    } finally {
+      setGeneratingAi(false);
+    }
+  };
+
   if (loading || !classData) return <div className="text-center py-5">Loading...</div>;
 
   return (
@@ -275,12 +443,15 @@ function ViewClass() {
       {/* MATERIALS SECTION */}
       <section className="py-5">
         <div className="container">
-          <div className="d-flex justify-content-between align-items-center mb-4">
+          <div className="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
             <h4 className="fw-bold mb-0">Class Materials</h4>
             {user.role === "professor" && (
-              <div className="d-flex gap-2">
+              <div className="d-flex gap-2 flex-wrap">
                 <button className="btn btn-primary shadow-sm" onClick={() => setShowLessonModal(true)}>+ Add Lesson</button>
                 <button className="btn btn-outline-primary shadow-sm" onClick={() => setShowQuizModal(true)}>+ Add Quiz</button>
+                <button className="btn btn-dark shadow-sm d-flex align-items-center gap-1" onClick={() => setShowAiQuizModal(true)}>
+                  <span>✨</span> AI Quiz Generator
+                </button>
               </div>
             )}
           </div>
@@ -324,7 +495,7 @@ function ViewClass() {
                               <ul className="dropdown-menu dropdown-menu-end shadow-sm border-0 rounded-3">
                                 <li>
                                   <button 
-                                    className="dropdown-menu-item dropdown-item text-danger d-flex align-items-center gap-2 small"
+                                    className="dropdown-item text-danger d-flex align-items-center gap-2 small"
                                     onClick={() => setDeleteModal({ show: true, id: item.id, title: item.title, attachments: item.attachments || [] })}
                                   >
                                     <span>🗑️</span> Delete Lesson
@@ -372,9 +543,7 @@ function ViewClass() {
           setSearchTerm={setSearchTerm}
           onSelectStudent={(student) => setSelectedStudent(student)}
         />
-      ) : (
-        <StudentProgressOverview />
-      )}
+      ) : null}
 
       {/* STUDENT DETAILS & ACHIEVEMENTS MODAL */}
       {selectedStudent && (
@@ -452,6 +621,137 @@ function ViewClass() {
                 <button type="submit" className="btn btn-primary px-5 fw-bold">Save Quiz</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* AI QUIZ GENERATOR MODAL */}
+      {showAiQuizModal && (
+        <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)", overflowY: "auto" }}>
+          <div className="modal-dialog modal-lg">
+            <form className="modal-content border-0 shadow-lg rounded-4" onSubmit={handleGenerateAiQuiz}>
+              <div className="modal-header border-0 p-4 pb-0">
+                <div className="d-flex align-items-center gap-2">
+                  <span className="fs-4">✨</span>
+                  <h5 className="fw-bold mb-0">AI Quiz Generator</h5>
+                </div>
+                <button type="button" className="btn-close" onClick={() => setShowAiQuizModal(false)}></button>
+              </div>
+
+              <div className="modal-body p-4">
+                <div className="mb-4">
+                  <label className="form-label small fw-bold text-muted">QUIZ TITLE (OPTIONAL)</label>
+                  <input 
+                    type="text" 
+                    className="form-control" 
+                    placeholder="Leave blank to let AI generate a title based on content" 
+                    value={aiQuizTitle}
+                    onChange={(e) => setAiQuizTitle(e.target.value)}
+                  />
+                </div>
+
+                <div className="mb-4">
+                  <label className="form-label small fw-bold text-muted">SOURCE MATERIAL</label>
+                  <div className="btn-group w-100 mb-3" role="group">
+                    <button 
+                      type="button" 
+                      className={`btn ${aiSourceType === 'lesson' ? 'btn-primary' : 'btn-outline-primary'}`}
+                      onClick={() => setAiSourceType('lesson')}
+                    >
+                      From Existing Lesson
+                    </button>
+                    <button 
+                      type="button" 
+                      className={`btn ${aiSourceType === 'custom' ? 'btn-primary' : 'btn-outline-primary'}`}
+                      onClick={() => setAiSourceType('custom')}
+                    >
+                      Custom Text & Files
+                    </button>
+                  </div>
+
+                  {aiSourceType === 'lesson' ? (
+                    <select 
+                      className="form-select form-select-lg" 
+                      value={selectedLessonId} 
+                      onChange={(e) => setSelectedLessonId(e.target.value)}
+                      required
+                    >
+                      <option value="">-- Choose a Lesson --</option>
+                      {classContent.filter(c => c.type === 'lesson').map(lesson => (
+                        <option key={lesson.id} value={lesson.id}>{lesson.title}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <div>
+                      <textarea 
+                        className="form-control mb-3" 
+                        rows="4" 
+                        placeholder="Paste your custom study material, notes, or instructions here..."
+                        value={customPrompt}
+                        onChange={(e) => setCustomPrompt(e.target.value)}
+                        required={aiFiles.length === 0}
+                      ></textarea>
+                      <label className="form-label small fw-bold text-muted">Attach Reference Files</label>
+                      <input 
+                        type="file" 
+                        multiple 
+                        className="form-control"
+                        accept="image/*,.pdf,.doc,.docx,.txt"
+                        onChange={(e) => setAiFiles(Array.from(e.target.files))}
+                      />
+                    </div>
+                  )}
+
+                  <div className="form-text text-muted small mt-2">
+                    ℹ️ <strong>Note:</strong> The AI can only read <strong>PDF documents</strong> and <strong>images (JPEG, PNG, WEBP)</strong>. Other file types will be ignored.
+                  </div>
+                </div>
+
+                <div className="row g-3 mb-3">
+                  <div className="col-md-6">
+                    <label className="form-label small fw-bold text-muted">DIFFICULTY LEVEL</label>
+                    <select className="form-select" value={aiDifficulty} onChange={(e) => setAiDifficulty(e.target.value)}>
+                      <option value="Easy">Easy</option>
+                      <option value="Medium">Medium</option>
+                      <option value="Hard">Hard</option>
+                    </select>
+                  </div>
+                  <div className="col-md-6">
+                    <label className="form-label small fw-bold text-muted">NUMBER OF QUESTIONS</label>
+                    <input 
+                      type="number" 
+                      className="form-control" 
+                      min="1" 
+                      max="20" 
+                      value={aiNumQuestions} 
+                      onChange={(e) => setAiNumQuestions(parseInt(e.target.value) || 5)}
+                      required 
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="modal-footer border-0 p-4 pt-0">
+                <button type="button" className="btn btn-light px-4 rounded-pill" onClick={() => setShowAiQuizModal(false)} disabled={generatingAi}>Cancel</button>
+                <button type="submit" className="btn btn-primary px-5 rounded-pill fw-bold shadow-sm" disabled={generatingAi}>
+                  {generatingAi ? "Generating Quiz with AI..." : "✨ Generate Quiz"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* AI SUCCESS MODAL */}
+      {aiSuccessModal && (
+        <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)", zIndex: 1070 }}>
+          <div className="modal-dialog modal-dialog-centered">
+            <div className="modal-content border-0 shadow-lg rounded-4 text-center p-4">
+              <div className="display-3 text-success mb-2">🎉</div>
+              <h4 className="fw-bold">Quiz Generated Successfully!</h4>
+              <p className="text-muted small mb-4">Your AI-powered quiz has been created and added to the class materials.</p>
+              <button className="btn btn-primary rounded-pill px-4 py-2 fw-bold" onClick={() => setAiSuccessModal(false)}>Awesome</button>
+            </div>
           </div>
         </div>
       )}
@@ -575,7 +875,7 @@ function ProfessorGradebook({ students, scores, classContent, searchTerm, setSea
                             </div>
                           )}
                           <div>
-                            <div className="fw-bold text-primary text-decoration-underline-hover">{s.fullname}</div>
+                            <div className="fw-bold text-primary">{s.fullname}</div>
                             <small className="text-muted d-block" style={{ fontSize: "0.75rem" }}>Click for details</small>
                           </div>
                         </div>
@@ -654,9 +954,8 @@ function StudentDetailsModal({ student, scores, classContent, onClose }) {
           </div>
 
           <div className="modal-body p-4 bg-light">
-            
             <div className="card border-0 shadow-sm rounded-4 p-3 bg-white mb-4">
-              <h6 className="fw-bold text-muted small uppercase mb-2">📊 CLASS PROGRESS</h6>
+              <h6 className="fw-bold text-muted small mb-2">📊 CLASS PROGRESS</h6>
               <div className="d-flex align-items-center justify-content-between mb-2">
                 <span className="fw-bold fs-5 text-dark">{progressPercentage}% Completed</span>
                 <span className="small text-muted">{completedCount} of {totalQuizzes} Quizzes Done</span>
@@ -671,7 +970,7 @@ function StudentDetailsModal({ student, scores, classContent, onClose }) {
             </div>
 
             <div className="card border-0 shadow-sm rounded-4 p-3 bg-white mb-4">
-              <h6 className="fw-bold text-muted small uppercase mb-3">🏅 ACHIEVEMENTS</h6>
+              <h6 className="fw-bold text-muted small mb-3">🏅 ACHIEVEMENTS</h6>
               <div className="row g-2">
                 {achievements.map((ach, idx) => (
                   <div key={idx} className="col-sm-6">
@@ -688,7 +987,7 @@ function StudentDetailsModal({ student, scores, classContent, onClose }) {
             </div>
 
             <div className="card border-0 shadow-sm rounded-4 p-3 bg-white">
-              <h6 className="fw-bold text-muted small uppercase mb-3">📝 QUIZ SCORES BREAKDOWN</h6>
+              <h6 className="fw-bold text-muted small mb-3">📝 QUIZ SCORES BREAKDOWN</h6>
               {quizzes.length > 0 ? (
                 <div className="table-responsive">
                   <table className="table table-sm table-borderless align-middle mb-0">
@@ -706,17 +1005,11 @@ function StudentDetailsModal({ student, scores, classContent, onClose }) {
                         const rawScore = attempt ? Math.round((attempt.score / 100) * totalQ) : 0;
 
                         return (
-                          <tr key={quiz.id} className="border-bottom-subtle">
+                          <tr key={quiz.id} className="border-bottom">
                             <td className="fw-bold text-dark py-2">{quiz.title}</td>
-                            <td className="text-center fw-bold text-primary py-2">
-                              {attempt ? `${rawScore} / ${totalQ}` : "---"}
-                            </td>
-                            <td className="text-end py-2">
-                              {attempt ? (
-                                <span className="badge bg-success-subtle text-success border border-success-subtle px-2 py-1">Completed</span>
-                              ) : (
-                                <span className="badge bg-secondary-subtle text-secondary px-2 py-1">Pending</span>
-                              )}
+                            <td className="text-center fw-bold text-primary">{attempt ? `${rawScore} / ${totalQ}` : "---"}</td>
+                            <td className="text-end">
+                              {attempt ? <span className="badge bg-success-subtle text-success">Passed</span> : <span className="badge bg-secondary-subtle text-muted">Pending</span>}
                             </td>
                           </tr>
                         );
@@ -725,37 +1018,18 @@ function StudentDetailsModal({ student, scores, classContent, onClose }) {
                   </table>
                 </div>
               ) : (
-                <div className="text-muted small">No quizzes available for this class yet.</div>
+                <div className="text-muted small text-center py-2">No quizzes available.</div>
               )}
             </div>
 
           </div>
-
-          <div className="modal-footer border-top-0 bg-light pt-0">
-            <button className="btn btn-secondary rounded-pill px-4" onClick={onClose}>Close</button>
+          <div className="modal-footer border-0 p-3 bg-white">
+            <button type="button" className="btn btn-secondary rounded-pill px-4" onClick={onClose}>Close</button>
           </div>
 
         </div>
       </div>
     </div>
-  );
-}
-
-function StudentProgressOverview() {
-  return (
-    <section className="py-5 bg-light">
-      <div className="container">
-        <div className="card border-0 shadow-sm rounded-4 p-4 bg-primary text-white">
-          <div className="d-flex align-items-center">
-            <div className="display-4 me-3">💡</div>
-            <div>
-              <h4 className="fw-bold mb-1">Learning Tip</h4>
-              <p className="mb-0 opacity-75">Review all lessons thoroughly. You only get retakes on quizzes if you haven't mastered them yet!</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
   );
 }
 

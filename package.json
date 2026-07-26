@@ -10,9 +10,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@google/genai": "^2.13.0",
     "@google/generative-ai": "^0.24.1",
     "@supabase/supabase-js": "^2.110.8",
     "bootstrap": "^5.3.8",
+    "cors": "^2.8.6",
     "firebase": "^12.8.0",
     "framer-motion": "^12.29.2",
     "react": "^19.2.0",

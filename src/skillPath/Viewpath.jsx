@@ -2,6 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { auth, db } from "../firebase";
 import { supabase } from "../supabase";
+import { GoogleGenAI, Type } from "@google/genai";
 import {
   collection,
   doc,
@@ -13,6 +14,9 @@ import {
   deleteDoc,
   serverTimestamp,
 } from "firebase/firestore";
+
+// Initialize the Gemini AI SDK using your environment variable
+const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY });
 
 function ViewPath() {
   const navigate = useNavigate();
@@ -41,7 +45,7 @@ function ViewPath() {
   // --- FILE PREVIEW MODAL STATE ---
   const [previewFile, setPreviewFile] = useState(null);
 
-  // --- ADMIN/PROFESSOR FORM STATES ---
+  // --- ADMIN/PROFESSOR/ADMIN ASSISTANT FORM STATES ---
   const [lessonForm, setLessonForm] = useState({ title: "", description: "", links: [], files: [] });
   const [linkInput, setLinkInput] = useState({ title: "", url: "" });
   const [uploadingFile, setUploadingFile] = useState(false);
@@ -49,6 +53,19 @@ function ViewPath() {
   const [quizForm, setQuizForm] = useState([
     { question: "", choices: [{ text: "", isCorrect: true }, { text: "", isCorrect: false }] }
   ]);
+
+  // --- AI QUIZ GENERATOR STATES ---
+  const [aiModalOpen, setAiModalOpen] = useState(false);
+  const [aiInputMode, setAiInputMode] = useState("lesson"); // "lesson" or "paste"
+  const [aiLessonTarget, setAiLessonTarget] = useState("");
+  const [aiPastedText, setAiPastedText] = useState("");
+  const [aiAttachedFiles, setAiAttachedFiles] = useState([]); // files attached specifically for AI generation
+  const [aiDifficulty, setAiDifficulty] = useState("Medium");
+  const [aiNumQuestions, setAiNumQuestions] = useState(5);
+  const [isGeneratingAi, setIsGeneratingAi] = useState(false);
+
+  // --- AI GENERATION SUCCESS MODAL STATE ---
+  const [aiSuccessModalOpen, setAiSuccessModalOpen] = useState(false);
 
   // --- MODAL STATES ---
   const [editLessonTarget, setEditLessonTarget] = useState(null);
@@ -302,6 +319,31 @@ function ViewPath() {
     }
   };
 
+  // --- HELPER TO CONVERT URL TO BASE64 FOR GEMINI MULTIMODAL ---
+  const fileToGenerativePart = async (fileUrl, mimeType) => {
+    try {
+      const response = await fetch(fileUrl);
+      const blob = await response.blob();
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64Data = reader.result.split(",")[1];
+          resolve({
+            inlineData: {
+              data: base64Data,
+              mimeType: mimeType || "application/octet-stream"
+            },
+          });
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    } catch (e) {
+      console.error("Error converting file for AI:", e);
+      return null;
+    }
+  };
+
   const addLinkToForm = () => {
     if (!linkInput.title || !linkInput.url) return alert("Fill link title and URL");
     setLessonForm({ ...lessonForm, links: [...(lessonForm.links || []), linkInput] });
@@ -398,6 +440,123 @@ function ViewPath() {
     fetchData();
   };
 
+  // --- AI GENERATION HANDLER WITH AUTO-RETRY & MULTIMODAL SUPPORT ---
+  const handleGenerateAiQuiz = async () => {
+    let promptContent = "";
+    let targetLessonTitle = "Custom Content Quiz";
+    let targetLessonIdForQuiz = aiLessonTarget;
+    let fileParts = [];
+
+    if (aiInputMode === "lesson") {
+      if (!aiLessonTarget) return alert("Please select a lesson for the AI to read!");
+      const targetLesson = lessons.find(l => l.id === aiLessonTarget);
+      if (!targetLesson) return alert("Lesson not found.");
+      targetLessonTitle = targetLesson.title;
+      promptContent = `Generate a ${aiDifficulty} quiz with ${aiNumQuestions} questions based on this lesson:\n\nTitle: ${targetLesson.title}\nContent: ${targetLesson.description}`;
+      
+      // If the selected lesson also has attached files, process them for AI analysis
+      if (targetLesson.files && targetLesson.files.length > 0) {
+        for (const f of targetLesson.files) {
+          const part = await fileToGenerativePart(f.url, f.type);
+          if (part) fileParts.push(part);
+        }
+      }
+    } else {
+      if (!aiPastedText.trim() && aiAttachedFiles.length === 0) {
+        return alert("Please paste some lesson text or attach an image/PDF for the AI to analyze!");
+      }
+      promptContent = `Generate a ${aiDifficulty} quiz with ${aiNumQuestions} questions based on the provided text and/or attached files:\n\nContent:\n${aiPastedText}`;
+      
+      for (const f of aiAttachedFiles) {
+        const part = await fileToGenerativePart(f.url, f.type);
+        if (part) fileParts.push(part);
+      }
+    }
+
+    setIsGeneratingAi(true);
+
+    const generateWithRetry = async (retries = 3, delay = 5000) => {
+      try {
+        const contentsArray = [promptContent, ...fileParts];
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.5-flash-lite',
+          contents: contentsArray,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                questions: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      question: { type: Type.STRING },
+                      choices: {
+                        type: Type.ARRAY,
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            text: { type: Type.STRING },
+                            isCorrect: { type: Type.BOOLEAN }
+                          },
+                          required: ["text", "isCorrect"]
+                        }
+                      }
+                    },
+                    required: ["question", "choices"]
+                  }
+                }
+              },
+              required: ["questions"]
+            }
+          }
+        });
+        return response;
+      } catch (err) {
+        if (err.status === 429 && retries > 0) {
+          console.warn(`Rate limited (429). Retrying in ${delay / 1000} seconds...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          return generateWithRetry(retries - 1, delay * 2);
+        }
+        throw err;
+      }
+    };
+
+    try {
+      const response = await generateWithRetry();
+      const data = JSON.parse(response.text);
+      
+      if (data.questions) {
+        await addDoc(collection(db, "content", pathId, "quizzes"), {
+          lessonId: targetLessonIdForQuiz || null,
+          title: `AI Quiz (${aiDifficulty}): ${targetLessonTitle}`,
+          questions: data.questions, 
+          createdBy: user.uid,
+          createdAt: serverTimestamp(),
+        });
+
+        setAiModalOpen(false);
+        setAiLessonTarget("");
+        setAiPastedText("");
+        setAiAttachedFiles([]);
+        fetchData();
+        setAiSuccessModalOpen(true);
+      } else {
+        alert("Failed to parse AI response.");
+      }
+    } catch (err) {
+      console.error("AI Generation Error:", err);
+      if (err.status === 429) {
+        alert("You have hit the free tier rate limit. Please wait about a minute before trying again.");
+      } else {
+        alert("Error generating quiz with AI. Check console for details.");
+      }
+    } finally {
+      setIsGeneratingAi(false);
+    }
+  };
+
   const handleUpdateLesson = async () => {
     await updateDoc(doc(db, "content", pathId, "lessons", editLessonTarget.id), {
       title: editLessonTarget.title,
@@ -425,7 +584,6 @@ function ViewPath() {
   const confirmDelete = async () => {
     try {
       if (deleteTarget.type === "lesson") {
-        // 1. Fetch lesson to pull all attached files and purge them from Supabase storage
         const lessonRef = doc(db, "content", pathId, "lessons", deleteTarget.id);
         const lessonSnap = await getDoc(lessonRef);
 
@@ -446,7 +604,6 @@ function ViewPath() {
           }
         }
 
-        // 2. Also remove any attached quiz associated with this lesson to avoid orphaned documents
         const quizzesSnap = await getDocs(collection(db, "content", pathId, "quizzes"));
         const attachedQuiz = quizzesSnap.docs.find(q => q.data().lessonId === deleteTarget.id);
         if (attachedQuiz) {
@@ -454,7 +611,6 @@ function ViewPath() {
         }
       }
 
-      // 3. Delete the target document from Firestore
       await deleteDoc(doc(db, "content", pathId, getCollectionName(deleteTarget.type), deleteTarget.id));
     } catch (err) {
       console.error("Error executing deletion workflow:", err);
@@ -567,7 +723,7 @@ function ViewPath() {
   const activeQuiz = quizzes.find((q) => q.id === activeQuizId);
   const progressPercent = lessons.length ? Math.round((completedLessons.length / lessons.length) * 100) : 0;
   
-  const canManageCurriculum = user?.role === "admin" || user?.role === "professor";
+  const canManageCurriculum = user?.role === "admin" || user?.role === "professor" || user?.role === "admin assistant";
 
   return (
     <div className="bg-light min-vh-100 pb-5">
@@ -647,7 +803,7 @@ function ViewPath() {
               <div className="d-flex justify-content-between align-items-end">
                 <div>
                   <span className="badge bg-primary mb-2 text-uppercase">
-                    {canManageCurriculum ? `${user?.role === 'admin' ? 'Admin' : 'Professor'} Path Management` : 'Learning Path'}
+                    {canManageCurriculum ? `${user?.role === 'admin' ? 'Admin' : user?.role === 'admin assistant' ? 'Admin Assistant' : 'Professor'} Path Management` : 'Learning Path'}
                   </span>
                   <h1 className="fw-bolder mb-1">{path.title}</h1>
                   <p className="text-muted mb-0">{path.description}</p>
@@ -673,7 +829,7 @@ function ViewPath() {
 
       <div className="container">
         {canManageCurriculum ? (
-          /* --- ADMIN & PROFESSOR SECTION --- */
+          /* --- ADMIN, PROFESSOR & ADMIN ASSISTANT SECTION --- */
           <div className="row g-4">
             <div className="col-lg-5">
               <div className="card border-0 shadow-sm p-4 mb-4 rounded-4">
@@ -736,9 +892,18 @@ function ViewPath() {
                 </button>
               </div>
 
-              {/* QUIZ CREATION FORM */}
+              {/* --- AI QUIZ ASSISTANT BUTTON --- */}
+              <div className="card border-0 shadow-sm p-4 rounded-4 mb-4 bg-gradient text-primary" style={{ background: 'linear-gradient(135deg, #6610f2 0%, #0d6efd 100%)' }}>
+                <h5 className="fw-bold mb-2 text-primary">✨ AI Quiz Assistant</h5>
+                <p className="small text-muted mb-3">Automatically read a lesson, pasted text, or attached files to generate custom quizzes using AI.</p>
+                <button className="btn btn-primary fw-bold text-white rounded-pill shadow-sm" onClick={() => setAiModalOpen(true)}>
+                  Generate AI Quiz
+                </button>
+              </div>
+
+              {/* MANUAL QUIZ CREATION FORM */}
               <div className="card border-0 shadow-sm p-4 rounded-4">
-                <h5 className="fw-bold text-primary mb-3">Create Quiz</h5>
+                <h5 className="fw-bold text-primary mb-3">Create Manual Quiz</h5>
                 <label className="small fw-bold text-muted mb-1">SELECT LESSON TO ATTACH</label>
                 <select className="form-select mb-3 border-primary" value={selectedLessonForQuiz} onChange={e => setSelectedLessonForQuiz(e.target.value)}>
                   <option value="">Choose a lesson...</option>
@@ -1008,7 +1173,174 @@ function ViewPath() {
         )}
       </div>
 
-      {/* --- FILE PREVIEW MODAL (SCROLLABLE CONTENT & STICKY CONTROLS) --- */}
+      {/* --- AI QUIZ GENERATION MODAL (WITH TOGGLE & FILE/IMAGE ANALYSIS) --- */}
+      {aiModalOpen && (
+        <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)" }}>
+          <div className="modal-dialog modal-dialog-centered">
+            <div className="modal-content border-0 rounded-4 shadow p-4 bg-white text-dark">
+              <h4 className="fw-bold text-primary mb-3">🤖 Generate Quiz with AI</h4>
+              
+              {/* TOGGLE OPTIONS */}
+              <div className="btn-group w-100 mb-3" role="group">
+                <input 
+                  type="radio" 
+                  className="btn-check" 
+                  name="aiInputModeOptions" 
+                  id="modeLesson" 
+                  checked={aiInputMode === "lesson"} 
+                  onChange={() => setAiInputMode("lesson")} 
+                />
+                <label className="btn btn-outline-primary" htmlFor="modeLesson">Read from Lesson</label>
+
+                <input 
+                  type="radio" 
+                  className="btn-check" 
+                  name="aiInputModeOptions" 
+                  id="modePaste" 
+                  checked={aiInputMode === "paste"} 
+                  onChange={() => setAiInputMode("paste")} 
+                />
+                <label className="btn btn-outline-primary" htmlFor="modePaste">Paste Lesson / Attach Files</label>
+              </div>
+
+              {aiInputMode === "lesson" ? (
+                <>
+                  <label className="form-label small fw-bold text-dark mb-1">SELECT LESSON TO READ</label>
+                  <select className="form-select mb-3 border-primary text-dark" value={aiLessonTarget} onChange={e => setAiLessonTarget(e.target.value)}>
+                    <option value="">Choose a lesson...</option>
+                    {lessons.map(l => (
+                      <option key={l.id} value={l.id}>{l.title}</option>
+                    ))}
+                  </select>
+                </>
+              ) : (
+                <>
+                  <label className="form-label small fw-bold text-dark mb-1">SELECT LESSON TO ATTACH QUIZ TO</label>
+                  <select className="form-select mb-3 border-primary text-dark" value={aiLessonTarget} onChange={e => setAiLessonTarget(e.target.value)}>
+                    <option value="">Choose a lesson to match with...</option>
+                    {lessons.map(l => (
+                      <option key={l.id} value={l.id}>{l.title}</option>
+                    ))}
+                  </select>
+
+                  <label className="form-label small fw-bold text-dark mb-1">PASTE LESSON CONTENT</label>
+                  <textarea 
+                    className="form-control mb-3 text-dark" 
+                    rows="4" 
+                    placeholder="Paste text content here..."
+                    value={aiPastedText}
+                    onChange={e => setAiPastedText(e.target.value)}
+                  />
+
+                  <label className="form-label small fw-bold text-dark mb-1">ATTACH FILES / IMAGES FOR AI ANALYSIS</label>
+                  <input 
+                    type="file" 
+                    multiple
+                    className="form-control form-control-sm mb-2" 
+                    accept="image/*,.pdf"
+                    onChange={async (e) => {
+                      const selectedFiles = e.target.files;
+                      if (!selectedFiles || selectedFiles.length === 0) return;
+                      
+                      const validFiles = Array.from(selectedFiles).filter(file => {
+                        const isSupported = file.type.startsWith('image/') || file.type === 'application/pdf';
+                        if (!isSupported) {
+                          alert(`Skipped ${file.name}: Only images and PDF files are supported for direct AI analysis.`);
+                        }
+                        return isSupported;
+                      });
+
+                      if (validFiles.length === 0) return;
+
+                      setUploadingFile(true);
+                      try {
+                        const uploaded = [];
+                        for (const file of validFiles) {
+                          const fileExt = file.name.split(".").pop();
+                          const fileName = `ai_${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
+                          const filePath = `${pathId}/ai_temp/${fileName}`;
+                          await supabase.storage.from("learning_paths").upload(filePath, file);
+                          const { data: publicUrlData } = supabase.storage.from("learning_paths").getPublicUrl(filePath);
+                          uploaded.push({
+                            name: file.name,
+                            url: publicUrlData.publicUrl,
+                            path: filePath,
+                            type: file.type,
+                            size: (file.size / 1024 / 1024).toFixed(2) + " MB"
+                          });
+                        }
+                        setAiAttachedFiles(prev => [...prev, ...uploaded]);
+                      } catch (err) {
+                        console.error("AI File Upload Error:", err);
+                        alert("Failed to upload attachment.");
+                      } finally {
+                        setUploadingFile(false);
+                      }
+                    }}
+                    disabled={uploadingFile}
+                  />
+                  {uploadingFile && <div className="text-muted small mb-2">Uploading file for AI analysis...</div>}
+
+                  <div className="d-flex flex-wrap gap-2 mb-3">
+                    {aiAttachedFiles.map((file, i) => (
+                      <span key={i} className="badge bg-light text-dark border p-2 d-flex align-items-center gap-1 shadow-sm">
+                        {getFileIcon(file.type, file.url)} <span className="text-truncate" style={{ maxWidth: "100px" }}>{file.name}</span>
+                        <button className="btn-close ms-2" style={{ fontSize: '8px' }} onClick={() => setAiAttachedFiles(aiAttachedFiles.filter((_, idx) => idx !== i))}></button>
+                      </span>
+                    ))}
+                  </div>
+                </>
+              )}
+
+              <label className="form-label small fw-bold text-dark mb-1">DIFFICULTY LEVEL</label>
+              <select className="form-select mb-3 text-dark" value={aiDifficulty} onChange={e => setAiDifficulty(e.target.value)}>
+                <option value="Easy">Easy</option>
+                <option value="Medium">Medium</option>
+                <option value="Hard">Hard</option>
+              </select>
+
+              <label className="form-label small fw-bold text-dark mb-1">NUMBER OF QUESTIONS</label>
+              <input 
+                type="number" 
+                className="form-control mb-4 text-dark" 
+                min="1" 
+                max="50" 
+                value={aiNumQuestions} 
+                onChange={e => setAiNumQuestions(Math.max(1, parseInt(e.target.value) || 1))} 
+              />
+
+              <div className="d-flex gap-2">
+                <button className="btn btn-primary w-100 fw-bold py-2" onClick={handleGenerateAiQuiz} disabled={isGeneratingAi || uploadingFile}>
+                  {isGeneratingAi ? "Reading & Generating..." : "Generate & Attach Quiz"}
+                </button>
+                <button className="btn btn-outline-secondary w-100 fw-bold py-2" onClick={() => setAiModalOpen(false)} disabled={isGeneratingAi}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- AI GENERATION SUCCESS MODAL --- */}
+      {aiSuccessModalOpen && (
+        <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)", zIndex: 1060 }}>
+          <div className="modal-dialog modal-dialog-centered modal-sm">
+            <div className="modal-content border-0 rounded-4 shadow p-4 text-center bg-white text-dark">
+              <div className="mb-3">
+                <span style={{ fontSize: '3rem' }}>🎉</span>
+              </div>
+              <h5 className="fw-bold mb-2">Success!</h5>
+              <p className="text-muted small mb-4">AI Quiz successfully generated and attached to your lesson!</p>
+              <button className="btn btn-primary w-100 rounded-pill fw-bold" onClick={() => setAiSuccessModalOpen(false)}>
+                Awesome
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- FILE PREVIEW MODAL --- */}
       {previewFile && (
         <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.8)", zIndex: 1050 }}>
           <div className="modal-dialog modal-dialog-centered modal-xl" style={{ height: '90vh' }}>
@@ -1070,7 +1402,7 @@ function ViewPath() {
         </div>
       )}
 
-      {/* --- ADMIN / PROFESSOR EDIT LESSON MODAL --- */}
+      {/* --- ADMIN / PROFESSOR / ADMIN ASSISTANT EDIT LESSON MODAL --- */}
       {editLessonTarget && (
         <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.5)", overflowY: "auto" }}>
           <div className="modal-dialog modal-dialog-centered">
