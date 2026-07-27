@@ -61,7 +61,7 @@ function ViewPath() {
   const [aiPastedText, setAiPastedText] = useState("");
   const [aiAttachedFiles, setAiAttachedFiles] = useState([]); // files attached specifically for AI generation
   const [aiDifficulty, setAiDifficulty] = useState("Medium");
-  const [aiNumQuestions, setAiNumQuestions] = useState(5);
+  const [aiNumQuestions, setAiNumQuestions] = useState("");
   const [isGeneratingAi, setIsGeneratingAi] = useState(false);
 
   // --- AI GENERATION SUCCESS MODAL STATE ---
@@ -446,13 +446,14 @@ function ViewPath() {
     let targetLessonTitle = "Custom Content Quiz";
     let targetLessonIdForQuiz = aiLessonTarget;
     let fileParts = [];
+    const finalNumQuestions = aiNumQuestions || 5;
 
     if (aiInputMode === "lesson") {
       if (!aiLessonTarget) return alert("Please select a lesson for the AI to read!");
       const targetLesson = lessons.find(l => l.id === aiLessonTarget);
       if (!targetLesson) return alert("Lesson not found.");
       targetLessonTitle = targetLesson.title;
-      promptContent = `Generate a ${aiDifficulty} quiz with ${aiNumQuestions} questions based on this lesson:\n\nTitle: ${targetLesson.title}\nContent: ${targetLesson.description}`;
+      promptContent = `Generate a ${aiDifficulty} quiz with ${finalNumQuestions} questions based on this lesson:\n\nTitle: ${targetLesson.title}\nContent: ${targetLesson.description}`;
       
       // If the selected lesson also has attached files, process them for AI analysis
       if (targetLesson.files && targetLesson.files.length > 0) {
@@ -465,7 +466,7 @@ function ViewPath() {
       if (!aiPastedText.trim() && aiAttachedFiles.length === 0) {
         return alert("Please paste some lesson text or attach an image/PDF for the AI to analyze!");
       }
-      promptContent = `Generate a ${aiDifficulty} quiz with ${aiNumQuestions} questions based on the provided text and/or attached files:\n\nContent:\n${aiPastedText}`;
+      promptContent = `Generate a ${aiDifficulty} quiz with ${finalNumQuestions} questions based on the provided text and/or attached files:\n\nContent:\n${aiPastedText}`;
       
       for (const f of aiAttachedFiles) {
         const part = await fileToGenerativePart(f.url, f.type);
@@ -1305,8 +1306,9 @@ function ViewPath() {
                 className="form-control mb-4 text-dark" 
                 min="1" 
                 max="50" 
+                placeholder="Leave it blank for AI to automatically generate 5"
                 value={aiNumQuestions} 
-                onChange={e => setAiNumQuestions(Math.max(1, parseInt(e.target.value) || 1))} 
+                onChange={e => setAiNumQuestions(e.target.value === "" ? "" : Math.max(1, parseInt(e.target.value) || 1))} 
               />
 
               <div className="d-flex gap-2">

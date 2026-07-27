@@ -53,7 +53,7 @@ function ViewClass() {
   const [customPrompt, setCustomPrompt] = useState("");
   const [aiFiles, setAiFiles] = useState([]);
   const [aiDifficulty, setAiDifficulty] = useState("Medium");
-  const [aiNumQuestions, setAiNumQuestions] = useState(5);
+  const [aiNumQuestions, setAiNumQuestions] = useState("");
   const [generatingAi, setGeneratingAi] = useState(false);
   const [aiSuccessModal, setAiSuccessModal] = useState(false);
 
@@ -338,9 +338,11 @@ function ViewClass() {
         }
       }
 
+      const effectiveNumQuestions = aiNumQuestions === "" ? 5 : aiNumQuestions;
+
       const promptPayload = [
         {
-          text: `You are an expert AI quiz creator for an educational platform. Based on the provided source material, generate a quiz with exactly ${aiNumQuestions} multiple-choice questions at a ${aiDifficulty} difficulty level.
+          text: `You are an expert AI quiz creator for an educational platform. Based on the provided source material, generate a quiz with exactly ${effectiveNumQuestions} multiple-choice questions at a ${aiDifficulty} difficulty level.
           
           Return ONLY a valid JSON object in the following format without any markdown code block formatting:
           {
@@ -410,6 +412,7 @@ function ViewClass() {
       setCustomPrompt("");
       setAiFiles([]);
       setAiQuizTitle("");
+      setAiNumQuestions(5);
       fetchClassDetails(user);
       setAiSuccessModal(true);
     } catch (err) {
@@ -644,7 +647,7 @@ function ViewClass() {
                   <input 
                     type="text" 
                     className="form-control" 
-                    placeholder="Leave blank to let AI generate a title based on content" 
+                    placeholder="Leave blank to let AI automatically generate a title based on content" 
                     value={aiQuizTitle}
                     onChange={(e) => setAiQuizTitle(e.target.value)}
                   />
@@ -723,9 +726,9 @@ function ViewClass() {
                       className="form-control" 
                       min="1" 
                       max="20" 
+                      placeholder="Leave blank for AI to automatically generate 5"
                       value={aiNumQuestions} 
-                      onChange={(e) => setAiNumQuestions(parseInt(e.target.value) || 5)}
-                      required 
+                      onChange={(e) => setAiNumQuestions(e.target.value === "" ? "" : parseInt(e.target.value) || 5)}
                     />
                   </div>
                 </div>
