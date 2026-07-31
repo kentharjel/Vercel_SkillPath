@@ -13,6 +13,8 @@ import {
   where,
   deleteDoc,
   onSnapshot,
+  addDoc,
+  serverTimestamp,
 } from "firebase/firestore";
 
 const APP_ID = import.meta.env.VITE_AGORA_APP_ID;
@@ -29,6 +31,7 @@ function OnlineRoom() {
   const maximizedVideoRef = useRef(null);
   const controlsTimeoutRef = useRef(null);
   const localVideoRef = useRef(null);
+  const chatScrollRef = useRef(null);
 
   const [remoteUsers, setRemoteUsers] = useState([]);
   const [remoteScreenShares, setRemoteScreenShares] = useState([]);
@@ -51,14 +54,33 @@ function OnlineRoom() {
   const [classDocId, setClassDocId] = useState(null);
   const [showEndedModal, setShowEndedModal] = useState(false);
 
+  // Room participants snapshot map to reliably match Firebase UIDs with Agora UIDs
+  const [roomParticipantsMap, setRoomParticipantsMap] = useState({});
+
+  // Zoom-like Chatroom & 3-Dots Menu States
+  const [showChat, setShowChat] = useState(false);
+  const [showChatMenu, setShowChatMenu] = useState(false);
+  const [messages, setMessages] = useState([]);
+  const [newMessage, setNewMessage] = useState("");
+  const [selectedRecipientUid, setSelectedRecipientUid] = useState("everyone");
+  const [unreadChatCount, setUnreadChatCount] = useState(0);
+  const [isUserScrolledUp, setIsUserScrolledUp] = useState(false);
+  const prevMessagesLengthRef = useRef(0);
+
   // Screen Share Permission State ("ask_first" | "can_share" | "not_permitted")
   const [screenSharePermission, setScreenSharePermission] = useState("ask_first");
   const [screenShareRequests, setScreenShareRequests] = useState({});
   const [isWaitingForApproval, setIsWaitingForApproval] = useState(false);
 
+  // Raise Hand & Reaction States
+  const [isHandRaised, setIsHandRaised] = useState(false);
+  const [handRaises, setHandRaises] = useState({});
+  const [floatingNotifications, setFloatingNotifications] = useState([]);
+  const lastSignalIdRef = useRef(null);
+
   // Screen Share Maximize & View States
   const [maximizedScreenId, setMaximizedScreenId] = useState(null);
-  const [maximizedOrientation, setMaximizedOrientation] = useState("landscape"); // "landscape" or "portrait"
+  const [maximizedOrientation, setMaximizedOrientation] = useState("landscape");
   const [showMaximizedControls, setShowMaximizedControls] = useState(true);
   const [activeScreenControlsId, setActiveScreenControlsId] = useState(null);
   const [hoveredScreenId, setHoveredScreenId] = useState(null);
@@ -74,7 +96,7 @@ function OnlineRoom() {
   const [modalErrorMessage, setModalErrorMessage] = useState("");
   const [showScreenShareRequestModal, setShowScreenShareRequestModal] = useState(false);
 
-  // Device settings states (Headset/Speaker, Microphone, Camera)
+  // Device settings states
   const [playbackDevices, setPlaybackDevices] = useState([]);
   const [microphones, setMicrophones] = useState([]);
   const [cameras, setCameras] = useState([]);
@@ -87,10 +109,9 @@ function OnlineRoom() {
   const [connectionStatus, setConnectionStatus] = useState("connecting");
   const [errorMessage, setErrorMessage] = useState(null);
 
-  // Check if mobile device
   const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
-  // Handle Autoplay restrictions across browsers safely (Mobile & Desktop)
+  // Handle Autoplay restrictions across browsers safely
   useEffect(() => {
     const handleAutoplayFailed = () => {
       console.warn("Audio autoplay was blocked. Touch/click anywhere on the screen to unblock audio.");
@@ -119,7 +140,6 @@ function OnlineRoom() {
     }
   }, []);
 
-  // Keep state refs updated for asynchronous Firestore & Agora listeners
   const isWaitingForApprovalRef = useRef(isWaitingForApproval);
   useEffect(() => {
     isWaitingForApprovalRef.current = isWaitingForApproval;
@@ -130,7 +150,15 @@ function OnlineRoom() {
     isCreatorOrProfRef.current = isCreatorOrProf;
   }, [isCreatorOrProf]);
 
-  // Timer reset function to auto-hide controls & cursor in maximized view
+  const triggerFloatingNotification = useCallback((signal) => {
+    const id = Date.now() + Math.random();
+    setFloatingNotifications((prev) => [...prev, { ...signal, uniqueKey: id }]);
+
+    setTimeout(() => {
+      setFloatingNotifications((prev) => prev.filter((n) => n.uniqueKey !== id));
+    }, 3500);
+  }, []);
+
   const resetControlsTimeout = useCallback(() => {
     setShowMaximizedControls(true);
     if (controlsTimeoutRef.current) {
@@ -141,7 +169,6 @@ function OnlineRoom() {
     }, 3000);
   }, []);
 
-  // Handle auto-hide lifecycle when entering or exiting maximized view
   useEffect(() => {
     if (maximizedScreenId) {
       resetControlsTimeout();
@@ -158,7 +185,6 @@ function OnlineRoom() {
     };
   }, [maximizedScreenId, resetControlsTimeout]);
 
-  // Track viewport dimension changes to accurately apply rotated landscape layout on mobile
   useEffect(() => {
     const handleResize = () => {
       setIsPhysicalPortrait(window.innerHeight > window.innerWidth);
@@ -171,7 +197,6 @@ function OnlineRoom() {
     };
   }, []);
 
-  // Callback ref to guarantee local camera video renders correctly when switching views
   const localVideoCallbackRef = useCallback((node) => {
     localVideoRef.current = node;
     const { videoTrack } = localTracksRef.current;
@@ -180,7 +205,6 @@ function OnlineRoom() {
     }
   }, []);
 
-  // Handle native Fullscreen API synchronization when desktop users maximize
   useEffect(() => {
     if (maximizedScreenId && !isMobile) {
       const elem = maximizedContainerRef.current;
@@ -210,7 +234,6 @@ function OnlineRoom() {
     };
   }, [isMobile]);
 
-  // Close maximized view and safely restore orientation settings
   const closeMaximizedView = useCallback(() => {
     setMaximizedScreenId(null);
     setShowMaximizedControls(true);
@@ -229,7 +252,6 @@ function OnlineRoom() {
     }
   }, [isMobile]);
 
-  // Toggle mobile orientation
   const toggleMaximizedOrientation = async () => {
     const nextOrientation = maximizedOrientation === "landscape" ? "portrait" : "landscape";
     setMaximizedOrientation(nextOrientation);
@@ -263,7 +285,6 @@ function OnlineRoom() {
     }
   };
 
-  // Screen share control functions
   const stopScreenShare = useCallback(async () => {
     const { screenVideoTrack, screenAudioTrack } = localScreenTracksRef.current;
     if (screenVideoTrack) {
@@ -291,7 +312,6 @@ function OnlineRoom() {
       const screenClient = screenClientRef.current;
       if (!screenClient) return;
 
-      // withAudio: "enable" (or "auto") prompts and enables system audio capture for all authorized users
       const screenTracks = await AgoraRTC.createScreenVideoTrack(
         {
           encoderConfig: {
@@ -348,7 +368,6 @@ function OnlineRoom() {
     }
   }, [stopScreenShare]);
 
-  // Collect screen shares
   const allScreenShares = [];
   if (isSharingScreen && localScreenTracksRef.current.screenVideoTrack) {
     allScreenShares.push({
@@ -373,7 +392,6 @@ function OnlineRoom() {
     });
   });
 
-  // Effect for playing maximized screen share track
   useEffect(() => {
     if (maximizedScreenId) {
       const targetScreen = allScreenShares.find((s) => s.id === maximizedScreenId);
@@ -389,7 +407,21 @@ function OnlineRoom() {
     }
   }, [maximizedScreenId, allScreenShares, maximizedOrientation, closeMaximizedView]);
 
-  // Fetch local user profile, check permissions, and listen for live session updates in real-time
+  // Real-time listener for Room Participants mapping
+  useEffect(() => {
+    if (!channelName) return;
+    const q = query(collection(db, "roomParticipants"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const map = {};
+      snapshot.forEach((docSnap) => {
+        map[docSnap.id] = docSnap.data();
+      });
+      setRoomParticipantsMap(map);
+    });
+    return () => unsubscribe();
+  }, [channelName]);
+
+  // Fetch user profile and listen for live session updates
   useEffect(() => {
     let isMounted = true;
 
@@ -441,6 +473,21 @@ function OnlineRoom() {
           setScreenSharePermission(classData.screenSharePermission);
         }
 
+        if (classData.handRaises) {
+          setHandRaises(classData.handRaises);
+          const currentUser = auth.currentUser;
+          if (currentUser) {
+            setIsHandRaised(!!classData.handRaises[currentUser.uid]);
+          }
+        }
+
+        if (classData.lastSignal) {
+          if (classData.lastSignal.id !== lastSignalIdRef.current) {
+            lastSignalIdRef.current = classData.lastSignal.id;
+            triggerFloatingNotification(classData.lastSignal);
+          }
+        }
+
         if (classData.screenShareRequests) {
           setScreenShareRequests(classData.screenShareRequests);
 
@@ -486,15 +533,90 @@ function OnlineRoom() {
       unsubscribeAuth();
       unsubscribeClass();
     };
-  }, [channelName, startScreenShare]);
+  }, [channelName, startScreenShare, triggerFloatingNotification]);
 
+  // Firestore Chatroom Listener with Unread Counter
+  useEffect(() => {
+    if (!channelName) return;
+    const q = query(
+      collection(db, "roomMessages"),
+      where("channelName", "==", channelName)
+    );
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const msgs = [];
+      snapshot.forEach((docSnap) => {
+        msgs.push({ id: docSnap.id, ...docSnap.data() });
+      });
+      msgs.sort((a, b) => {
+        const timeA = a.timestamp?.toMillis ? a.timestamp.toMillis() : (a.timestamp || 0);
+        const timeB = b.timestamp?.toMillis ? b.timestamp.toMillis() : (b.timestamp || 0);
+        return timeA - timeB;
+      });
+
+      if (msgs.length > prevMessagesLengthRef.current) {
+        const latestMsg = msgs[msgs.length - 1];
+        const currentUid = auth.currentUser?.uid;
+        const currentAgoraUid = clientRef.current?.uid;
+
+        if (latestMsg.senderUid !== currentUid) {
+          const isVisibleToMe =
+            !latestMsg.recipientUid ||
+            latestMsg.recipientUid === currentUid ||
+            (currentAgoraUid && String(latestMsg.recipientUid) === String(currentAgoraUid));
+          if (isVisibleToMe && !showChat) {
+            setUnreadChatCount((prev) => prev + 1);
+          }
+        }
+      }
+      prevMessagesLengthRef.current = msgs.length;
+      setMessages(msgs);
+    });
+    return () => unsubscribe();
+  }, [channelName, showChat]);
+
+  // Reset unread chat count when chat panel is opened
+  useEffect(() => {
+    if (showChat) {
+      setUnreadChatCount(0);
+      if (chatScrollRef.current) {
+        chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+      }
+      setIsUserScrolledUp(false);
+    }
+  }, [showChat]);
+
+  // Auto scroll when at bottom or new messages arrive
+  useEffect(() => {
+    if (showChat && chatScrollRef.current && !isUserScrolledUp) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+    }
+  }, [messages, showChat, isUserScrolledUp]);
+
+  const handleChatScroll = () => {
+    if (chatScrollRef.current) {
+      const { scrollTop, scrollHeight, clientHeight } = chatScrollRef.current;
+      const isAtBottom = scrollHeight - scrollTop - clientHeight < 40;
+      setIsUserScrolledUp(!isAtBottom);
+    }
+  };
+
+  const scrollToBottomChat = () => {
+    if (chatScrollRef.current) {
+      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
+      setIsUserScrolledUp(false);
+    }
+  };
+
+  // Sync current user presence to Firestore with Firebase Auth UID
   useEffect(() => {
     const client = clientRef.current;
-    if (joined && client && client.uid && userProfile.fullname && userProfile.fullname !== "Loading...") {
+    const currentUser = auth.currentUser;
+    if (joined && client && client.uid && currentUser && userProfile.fullname && userProfile.fullname !== "Loading...") {
       setDoc(
         doc(db, "roomParticipants", `${channelName}_${client.uid}`),
         {
           agoraUid: client.uid,
+          firebaseUid: currentUser.uid,
           fullname: userProfile.fullname,
           photoURL: userProfile.photoURL,
           role: userProfile.role,
@@ -512,7 +634,12 @@ function OnlineRoom() {
         if (snap.exists()) {
           const data = snap.data();
           if (data.fullname && data.fullname !== "Loading...") {
-            return { fullname: data.fullname, photoURL: data.photoURL || null, role: data.role || "student" };
+            return {
+              fullname: data.fullname,
+              photoURL: data.photoURL || null,
+              role: data.role || "student",
+              firebaseUid: data.firebaseUid || null,
+            };
           }
         }
       } catch (err) {
@@ -520,7 +647,7 @@ function OnlineRoom() {
       }
       await new Promise((res) => setTimeout(res, 800));
     }
-    return { fullname: `User ${agoraUid}`, photoURL: null, role: "student" };
+    return { fullname: `User ${agoraUid}`, photoURL: null, role: "student", firebaseUid: null };
   };
 
   useEffect(() => {
@@ -570,6 +697,7 @@ function OnlineRoom() {
                         fullname: profile.fullname !== `User ${user.uid}` ? profile.fullname : u.fullname,
                         photoURL: profile.photoURL || u.photoURL,
                         role: profile.role || u.role || "student",
+                        firebaseUid: profile.firebaseUid || u.firebaseUid || null,
                         hasVideo: true,
                         videoTrack: user.videoTrack,
                       }
@@ -588,6 +716,7 @@ function OnlineRoom() {
                     fullname: profile.fullname,
                     photoURL: profile.photoURL,
                     role: profile.role || "student",
+                    firebaseUid: profile.firebaseUid || null,
                   },
                 ];
               }
@@ -616,7 +745,6 @@ function OnlineRoom() {
 
         await client.join(APP_ID, channelName, token, uid);
 
-        // Enable volume indicators to detect active speakers
         client.enableAudioVolumeIndicator();
         client.on("volume-indicator", (volumes) => {
           const speakers = {};
@@ -762,6 +890,69 @@ function OnlineRoom() {
     };
   }, [joined, channelName]);
 
+  const toggleRaiseHand = async () => {
+    if (!classDocId) return;
+    const currentUser = auth.currentUser;
+    if (!currentUser) return;
+
+    const nextState = !isHandRaised;
+    setIsHandRaised(nextState);
+
+    try {
+      const signalId = Date.now() + Math.random();
+      const signalText = nextState 
+        ? `${userProfile.fullname} raises a hand` 
+        : `${userProfile.fullname} lowered their hand`;
+
+      await updateDoc(doc(db, "live_classes", classDocId), {
+        [`handRaises.${currentUser.uid}`]: nextState ? { fullname: userProfile.fullname, timestamp: Date.now() } : null,
+        lastSignal: {
+          id: signalId,
+          uid: currentUser.uid,
+          fullname: userProfile.fullname,
+          text: signalText,
+          type: "hand",
+          timestamp: Date.now(),
+        }
+      });
+    } catch (err) {
+      console.error("Error updating hand raise state:", err);
+    }
+  };
+
+  const sendHeartReaction = async () => {
+    if (!classDocId) return;
+    const currentUser = auth.currentUser;
+    if (!currentUser) return;
+
+    try {
+      const signalId = Date.now() + Math.random();
+      await updateDoc(doc(db, "live_classes", classDocId), {
+        lastSignal: {
+          id: signalId,
+          uid: currentUser.uid,
+          fullname: userProfile.fullname,
+          text: `${userProfile.fullname} reacted a heart`,
+          type: "heart",
+          timestamp: Date.now(),
+        }
+      });
+    } catch (err) {
+      console.error("Error sending heart reaction:", err);
+    }
+  };
+
+  const profesorLowerHand = async (studentUid) => {
+    if (!classDocId || !isCreatorOrProf) return;
+    try {
+      await updateDoc(doc(db, "live_classes", classDocId), {
+        [`handRaises.${studentUid}`]: null,
+      });
+    } catch (err) {
+      console.error("Error lowering hand:", err);
+    }
+  };
+
   const handleScreenShareClick = () => {
     if (isMobile) {
       setModalErrorMessage("Screen sharing is locked/restricted on mobile web browsers.");
@@ -777,7 +968,6 @@ function OnlineRoom() {
         return;
       }
 
-      // Check if user is professor or permitted student ("can_share")
       if (!isCreatorOrProf && screenSharePermission === "not_permitted") {
         setModalErrorMessage("Screen sharing is not permitted by the professor.");
         setShowErrorModal(true);
@@ -908,7 +1098,6 @@ function OnlineRoom() {
     }
   };
 
-  // Helper function to check if a user card is currently speaking
   const isCardSpeaking = (card) => {
     const uidStr = String(card.uid);
     const isLocalSpeaking = card.isLocal && (activeSpeakers["0"] || activeSpeakers[uidStr]);
@@ -917,9 +1106,11 @@ function OnlineRoom() {
     return (isLocalSpeaking || isRemoteSpeaking) && isMicOn;
   };
 
-  // Build list of user cards
+  // Reordered Definitions Below
+
   const localUserCard = {
     uid: clientRef.current?.uid || "local",
+    firebaseUid: auth.currentUser?.uid,
     fullname: userProfile.fullname,
     photoURL: userProfile.photoURL,
     isLocal: true,
@@ -928,22 +1119,70 @@ function OnlineRoom() {
     camActive: camActive,
   };
 
-  const remoteUserCards = remoteUsers.map((u) => ({
-    uid: u.uid,
-    fullname: u.fullname,
-    photoURL: u.photoURL,
-    isLocal: false,
-    isProf: u.role === "professor" || u.role === "admin",
-    hasVideo: u.hasVideo,
-    hasAudio: u.hasAudio,
-    videoTrack: u.videoTrack,
-  }));
+  const remoteUserCards = remoteUsers.map((u) => {
+    const participantData = roomParticipantsMap[`${channelName}_${u.uid}`] || {};
+    return {
+      uid: u.uid,
+      firebaseUid: u.firebaseUid || participantData.firebaseUid || null,
+      fullname: u.fullname !== `User ${u.uid}` ? u.fullname : (participantData.fullname || u.fullname),
+      photoURL: u.photoURL || participantData.photoURL || null,
+      isLocal: false,
+      isProf: (participantData.role === "professor" || participantData.role === "admin" || u.role === "professor" || u.role === "admin"),
+      hasVideo: u.hasVideo,
+      hasAudio: u.hasAudio,
+      videoTrack: u.videoTrack,
+    };
+  });
 
   const allUserCards = [localUserCard, ...remoteUserCards];
   const profUserCards = allUserCards.filter((u) => u.isProf);
   const studentUserCards = allUserCards.filter((u) => !u.isProf);
 
-  // Apply Priority Ordering Logic Rules
+  // Fixed Send Chat Message Handler supporting Private DMs
+  const handleSendMessage = async (e) => {
+    e.preventDefault();
+    if (!newMessage.trim()) return;
+    const currentUser = auth.currentUser;
+    if (!currentUser) return;
+
+    let recipientUid = null;
+    let recipientName = null;
+
+    if (selectedRecipientUid !== "everyone") {
+      recipientUid = selectedRecipientUid;
+      const targetUser = allUserCards.find(
+        (u) => u.firebaseUid === selectedRecipientUid || String(u.uid) === String(selectedRecipientUid)
+      );
+      recipientName = targetUser ? targetUser.fullname : "User";
+    }
+
+    try {
+      await addDoc(collection(db, "roomMessages"), {
+        channelName,
+        senderUid: currentUser.uid,
+        senderName: userProfile.fullname,
+        recipientUid,
+        recipientName,
+        text: newMessage.trim(),
+        timestamp: serverTimestamp(),
+      });
+      setNewMessage("");
+    } catch (err) {
+      console.error("Error sending chat message:", err);
+    }
+  };
+
+  // Filter messages visible to current user (Public messages OR DMs where user is sender or target)
+  const currentUid = auth.currentUser?.uid;
+  const currentAgoraUid = clientRef.current?.uid;
+  const visibleMessages = messages.filter((msg) => {
+    if (!msg.recipientUid) return true; // Public message visible to everyone
+    if (msg.senderUid === currentUid) return true; // Sender can see their sent DM
+    if (msg.recipientUid === currentUid) return true; // Targeted recipient sees the DM
+    if (currentAgoraUid && String(msg.recipientUid) === String(currentAgoraUid)) return true; // Fallback check for Agora UIDs
+    return false;
+  });
+
   const activeScreenShare = allScreenShares.length > 0 ? allScreenShares[0] : null;
   const orderedCards = [];
 
@@ -967,14 +1206,17 @@ function OnlineRoom() {
     orderedCards.push(...remainingStudentCards.map((u) => ({ type: "user", ...u })));
   }
 
+  const activeHandRaisesList = Object.entries(handRaises || {}).filter(([_, val]) => val !== null && val !== undefined);
+
   return (
     <div
-      className="container-fluid text-white min-vh-100 d-flex flex-column p-2 p-md-4"
-      style={{ backgroundColor: "#0b0f19" }}
+      className="container-fluid text-white min-vh-100 d-flex flex-column p-2 p-md-4 position-relative"
+      style={{ backgroundColor: "#0b0f19", overflowX: "hidden" }}
       onClick={() => {
         if (isMobile) {
           setActiveScreenControlsId(null);
         }
+        setShowChatMenu(false);
       }}
     >
       <style>{`
@@ -992,7 +1234,36 @@ function OnlineRoom() {
           animation: speakingGlow 1.5s infinite;
           border: 2px solid #22c55e !important;
         }
+        @keyframes floatUpFade {
+          0% { transform: translateY(30px) scale(0.8); opacity: 0; }
+          20% { transform: translateY(0px) scale(1); opacity: 1; }
+          80% { transform: translateY(-50px) scale(1); opacity: 1; }
+          100% { transform: translateY(-100px) scale(0.9); opacity: 0; }
+        }
+        .flying-notification {
+          animation: floatUpFade 3.5s ease-in-out forwards;
+          pointer-events: none;
+        }
       `}</style>
+
+      {/* Flying Notifications Overlay Container */}
+      <div
+        className="position-fixed start-50 translate-middle-x d-flex flex-column align-items-center gap-2"
+        style={{ zIndex: 9999, bottom: "90px", pointerEvents: "none" }}
+      >
+        {floatingNotifications.map((notif) => (
+          <div
+            key={notif.uniqueKey}
+            className={`flying-notification px-3 py-2 rounded-pill shadow-lg d-flex align-items-center gap-2 fw-semibold text-white ${
+              notif.type === "heart" ? "bg-danger bg-opacity-90 border border-danger" : "bg-primary bg-opacity-90 border border-primary"
+            }`}
+            style={{ fontSize: "14px", backdropFilter: "blur(6px)" }}
+          >
+            <ion-icon name={notif.type === "heart" ? "heart" : "hand-left"} style={{ fontSize: "18px" }}></ion-icon>
+            <span>{notif.text}</span>
+          </div>
+        ))}
+      </div>
 
       {/* Header Banner */}
       <div
@@ -1085,7 +1356,37 @@ function OnlineRoom() {
         </div>
       </div>
 
-      {/* Professor Real-Time Screen Share Requests Banner */}
+      {/* Professor Raised Hands Panel */}
+      {isCreatorOrProf && activeHandRaisesList.length > 0 && (
+        <div className="alert alert-warning border-0 shadow-lg rounded-4 mb-4 mx-2 d-flex flex-column gap-2" style={{ backgroundColor: "rgba(255, 193, 7, 0.15)", color: "#ffffff", border: "1px solid rgba(255, 193, 7, 0.3)" }}>
+          <div className="d-flex align-items-center justify-content-between">
+            <h6 className="fw-bold d-flex align-items-center gap-2 mb-0 text-warning">
+              <ion-icon name="hand-left-outline" style={{ fontSize: "20px" }}></ion-icon> Raised Hands
+            </h6>
+            <span className="badge bg-warning text-dark">
+              {activeHandRaisesList.length} Raised
+            </span>
+          </div>
+          <div className="d-flex flex-wrap gap-2 mt-1">
+            {activeHandRaisesList.map(([uid, data]) => (
+              <div key={uid} className="d-flex align-items-center justify-content-between bg-dark bg-opacity-50 px-3 py-1 rounded-pill border border-warning border-opacity-25 gap-3">
+                <span className="fw-semibold text-white small">
+                  <strong className="text-warning">{data.fullname || "Student"}</strong> raised a hand
+                </span>
+                <button
+                  className="btn btn-sm btn-outline-warning py-0 px-2 rounded-pill"
+                  style={{ fontSize: "11px" }}
+                  onClick={() => profesorLowerHand(uid)}
+                >
+                  Lower
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Professor Screen Share Requests Banner */}
       {isCreatorOrProf && Object.values(screenShareRequests).filter((r) => r && r.status === "pending").length > 0 && (
         <div className="alert alert-primary border-0 shadow-lg rounded-4 mb-4 mx-2 d-flex flex-column gap-2" style={{ backgroundColor: "rgba(13, 110, 253, 0.15)", color: "#ffffff", border: "1px solid rgba(13, 110, 253, 0.3)" }}>
           <div className="d-flex align-items-center justify-content-between">
@@ -1274,195 +1575,419 @@ function OnlineRoom() {
         );
       })()}
 
-      {/* Main Unified Video & Screen Share Grid */}
+      {/* Main Grid + Zoom-Like Chatroom Sidebar */}
       <div className="row g-3 flex-grow-1 align-items-start justify-content-center p-1">
-        {orderedCards.map((card) => {
-          if (card.type === "screenshare") {
-            const showControlsOnMobile = activeScreenControlsId === card.id;
-            const isHovered = hoveredScreenId === card.id;
+        <div className={showChat ? "col-12 col-lg-8 d-flex flex-column" : "col-12 col-lg-12 d-flex flex-column"}>
+          
+          {/* ---> EDITED ROW: Added justify-content-center to balance and center all cards <--- */}
+          <div className="row justify-content-center g-3 w-100 m-0">
+            {orderedCards.map((card) => {
+              if (card.type === "screenshare") {
+                const showControlsOnMobile = activeScreenControlsId === card.id;
+                const isHovered = hoveredScreenId === card.id;
 
-            return (
-              <div key={card.id} className="col-12 col-lg-8">
-                <div
-                  className="card border-0 shadow-lg rounded-4 overflow-hidden position-relative w-100"
-                  style={{
-                    height: "360px",
-                    backgroundColor: "#101726",
-                    border: "1px solid rgba(13, 110, 253, 0.4)",
-                  }}
-                  onMouseEnter={() => setHoveredScreenId(card.id)}
-                  onMouseLeave={() => setHoveredScreenId(null)}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (isMobile) {
-                      setActiveScreenControlsId(activeScreenControlsId === card.id ? null : card.id);
-                    }
-                  }}
-                >
-                  <div
-                    className="w-100 h-100 bg-black position-absolute top-0 start-0"
-                    ref={(node) => {
-                      if (node && card.videoTrack && maximizedScreenId !== card.id) {
-                        card.videoTrack.play(node);
-                      }
-                    }}
-                    style={{ objectFit: "contain" }}
-                  />
-
-                  <div className="position-absolute top-0 start-0 m-3 p-2 bg-dark bg-opacity-75 rounded-3 d-flex align-items-center gap-2 shadow-sm" style={{ zIndex: 10 }}>
-                    <span className="badge bg-primary text-white me-1">Screen Share</span>
-                    <span className="text-white small fw-bold">
-                      {card.isLocal ? `${card.fullname} (You)` : card.fullname}
-                    </span>
-                  </div>
-
-                  <div
-                    className={`position-absolute top-0 end-0 m-3 ${isMobile ? (showControlsOnMobile ? "d-block" : "d-none") : (isHovered ? "d-block" : "d-none")}`}
-                    style={{ zIndex: 15 }}
-                  >
-                    <button
-                      className="btn btn-dark bg-opacity-75 text-white btn-sm rounded-pill px-3 py-2 fw-semibold shadow d-flex align-items-center gap-1 border border-secondary border-opacity-50"
+                return (
+                  <div key={card.id} className="col-12 col-lg-12">
+                    <div
+                      className="card border-0 shadow-lg rounded-4 overflow-hidden position-relative w-100"
+                      style={{
+                        height: "360px",
+                        backgroundColor: "#101726",
+                        border: "1px solid rgba(13, 110, 253, 0.4)",
+                      }}
+                      onMouseEnter={() => setHoveredScreenId(card.id)}
+                      onMouseLeave={() => setHoveredScreenId(null)}
                       onClick={(e) => {
                         e.stopPropagation();
-                        setMaximizedScreenId(card.id);
-                      }}
-                    >
-                      <ion-icon name="expand-outline" style={{ fontSize: "16px" }}></ion-icon> Maximize
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          }
-
-          const speaking = isCardSpeaking(card);
-
-          // Render User Cards
-          return (
-            <div key={card.isLocal ? "local-user" : `remote-user-${card.uid}`} className={`col-12 col-md-6 ${activeScreenShare ? "col-lg-4" : "col-lg-4"}`}>
-              <div
-                className={`card border-0 shadow-lg rounded-4 overflow-hidden position-relative ${speaking ? "speaking-glow" : ""}`}
-                style={{
-                  height: activeScreenShare ? "360px" : "320px",
-                  backgroundColor: "#131b2e",
-                  border: speaking
-                    ? "2px solid #22c55e"
-                    : (card.isProf ? "2px solid rgba(13, 110, 253, 0.6)" : "1px solid rgba(255,255,255,0.06)"),
-                  transition: "border 0.2s ease, box-shadow 0.2s ease",
-                }}
-              >
-                {card.isProf && (
-                  <div className="position-absolute top-0 start-0 m-2 px-2 py-1 bg-primary rounded-2 text-white fw-semibold shadow-sm" style={{ zIndex: 10, fontSize: "11px" }}>
-                    <ion-icon name="school-outline" className="me-1"></ion-icon> Professor Lead
-                  </div>
-                )}
-
-                {/* Speaking Indicator Badge on Top Right */}
-                {speaking && (
-                  <div className="position-absolute top-0 end-0 m-2 px-2 py-1 bg-success text-white rounded-pill fw-semibold shadow-sm d-flex align-items-center gap-1" style={{ zIndex: 10, fontSize: "11px" }}>
-                    <ion-icon name="volume-high-outline"></ion-icon> Speaking...
-                  </div>
-                )}
-
-                {card.isLocal ? (
-                  <>
-                    <div
-                      ref={localVideoCallbackRef}
-                      className={`w-100 h-100 bg-black ${!camActive ? "d-none" : ""}`}
-                      style={{ objectFit: "cover" }}
-                    />
-
-                    {!camActive && (
-                      <div className="w-100 h-100 d-flex flex-column align-items-center justify-content-center position-absolute top-0 start-0" style={{ backgroundColor: "#101726" }}>
-                        {card.photoURL ? (
-                          <img
-                            src={card.photoURL}
-                            alt={card.fullname}
-                            className="rounded-circle object-fit-cover shadow-sm mb-2 border border-2 border-primary"
-                            style={{ width: "84px", height: "84px" }}
-                          />
-                        ) : (
-                          <div className="bg-primary bg-gradient rounded-circle text-white d-flex align-items-center justify-content-center fw-bold fs-2 shadow-sm mb-2 border border-2 border-primary" style={{ width: "84px", height: "84px" }}>
-                            {card.fullname ? card.fullname.charAt(0).toUpperCase() : "U"}
-                          </div>
-                        )}
-                        <span className="text-white fw-bold">{card.fullname}</span>
-                        <span className="text-secondary small mt-1 d-flex align-items-center gap-1">
-                          <ion-icon name="videocam-off-outline"></ion-icon> Camera is off
-                        </span>
-                      </div>
-                    )}
-
-                    <div className="position-absolute bottom-0 start-0 p-3 bg-dark bg-opacity-75 w-100 d-flex justify-content-between align-items-center" style={{ zIndex: 5 }}>
-                      <span className="text-white fw-bold small d-flex align-items-center gap-1 text-truncate" style={{ maxWidth: "60%" }}>
-                        <ion-icon name="person-circle-outline" style={{ fontSize: "16px" }}></ion-icon> {card.fullname} (You)
-                      </span>
-                      <span className={`badge ${micActive ? "bg-success text-white" : "bg-danger text-white"} d-flex align-items-center gap-1 px-2 py-1`} style={{ fontSize: "11px" }}>
-                        <ion-icon name={micActive ? "mic-outline" : "mic-off-outline"}></ion-icon> {micActive ? "Mic On" : "Muted"}
-                      </span>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div
-                      id={`remote-video-${card.uid}`}
-                      ref={(node) => {
-                        if (node && card.hasVideo && card.videoTrack) {
-                          card.videoTrack.play(node);
+                        if (isMobile) {
+                          setActiveScreenControlsId(activeScreenControlsId === card.id ? null : card.id);
                         }
                       }}
-                      className={`w-100 h-100 bg-black ${!card.hasVideo ? "d-none" : ""}`}
-                      style={{ objectFit: "cover" }}
-                    />
+                    >
+                      <div
+                        className="w-100 h-100 bg-black position-absolute top-0 start-0"
+                        ref={(node) => {
+                          if (node && card.videoTrack && maximizedScreenId !== card.id) {
+                            card.videoTrack.play(node);
+                          }
+                        }}
+                        style={{ objectFit: "contain" }}
+                      />
 
-                    {!card.hasVideo && (
-                      <div className="w-100 h-100 d-flex flex-column align-items-center justify-content-center position-absolute top-0 start-0" style={{ backgroundColor: "#101726" }}>
-                        {card.photoURL ? (
-                          <img
-                            src={card.photoURL}
-                            alt={card.fullname}
-                            className="rounded-circle object-fit-cover shadow-sm mb-2 border border-2 border-primary"
-                            style={{ width: "84px", height: "84px" }}
-                          />
-                        ) : (
-                          <div className="bg-primary bg-gradient rounded-circle text-white d-flex align-items-center justify-content-center fw-bold fs-2 shadow-sm mb-2 border border-2 border-primary" style={{ width: "84px", height: "84px" }}>
-                            {card.fullname ? card.fullname.charAt(0).toUpperCase() : "U"}
-                          </div>
-                        )}
-                        <span className="text-white fw-bold">{card.fullname}</span>
-                        <span className="text-secondary small mt-1 d-flex align-items-center gap-1">
-                          <ion-icon name="videocam-off-outline"></ion-icon> Camera is off
+                      <div className="position-absolute top-0 start-0 m-3 p-2 bg-dark bg-opacity-75 rounded-3 d-flex align-items-center gap-2 shadow-sm" style={{ zIndex: 10 }}>
+                        <span className="badge bg-primary text-white me-1">Screen Share</span>
+                        <span className="text-white small fw-bold">
+                          {card.isLocal ? `${card.fullname} (You)` : card.fullname}
                         </span>
+                      </div>
+
+                      <div
+                        className={`position-absolute top-0 end-0 m-3 ${isMobile ? (showControlsOnMobile ? "d-block" : "d-none") : (isHovered ? "d-block" : "d-none")}`}
+                        style={{ zIndex: 15 }}
+                      >
+                        <button
+                          className="btn btn-dark bg-opacity-75 text-white btn-sm rounded-pill px-3 py-2 fw-semibold shadow d-flex align-items-center gap-1 border border-secondary border-opacity-50"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setMaximizedScreenId(card.id);
+                          }}
+                        >
+                          <ion-icon name="expand-outline" style={{ fontSize: "16px" }}></ion-icon> Maximize
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+
+              const speaking = isCardSpeaking(card);
+              const userHandRaised = card.isLocal ? isHandRaised : !!handRaises[card.uid];
+
+              // ---> EDITED COLUMN: Changed col-lg-4 to col-lg-3 for a maximum of 4 per row <---
+              return (
+                <div key={card.isLocal ? "local-user" : `remote-user-${card.uid}`} className="col-12 col-md-6 col-lg-3">
+                  <div
+                    className={`card border-0 shadow-lg rounded-4 overflow-hidden position-relative ${speaking ? "speaking-glow" : ""}`}
+                    style={{
+                      height: activeScreenShare ? "360px" : "320px",
+                      backgroundColor: "#131b2e",
+                      border: speaking
+                        ? "2px solid #22c55e"
+                        : (card.isProf ? "2px solid rgba(13, 110, 253, 0.6)" : "1px solid rgba(255,255,255,0.06)"),
+                      transition: "border 0.2s ease, box-shadow 0.2s ease",
+                    }}
+                  >
+                    {card.isProf && (
+                      <div className="position-absolute top-0 start-0 m-2 px-2 py-1 bg-primary rounded-2 text-white fw-semibold shadow-sm" style={{ zIndex: 10, fontSize: "11px" }}>
+                        <ion-icon name="school-outline" className="me-1"></ion-icon> Professor Lead
                       </div>
                     )}
 
-                    <div className="position-absolute bottom-0 start-0 p-3 bg-dark bg-opacity-75 w-100 d-flex justify-content-between align-items-center" style={{ zIndex: 5 }}>
-                      <span className="text-white fw-bold small d-flex align-items-center gap-1 text-truncate" style={{ maxWidth: "60%" }}>
-                        <ion-icon name="people-outline" style={{ fontSize: "16px" }}></ion-icon> {card.fullname}
-                      </span>
-                      <span className={`badge ${card.hasAudio !== false ? "bg-success text-white" : "bg-danger text-white"} d-flex align-items-center gap-1 px-2 py-1`} style={{ fontSize: "11px" }}>
-                        <ion-icon name={card.hasAudio !== false ? "mic-outline" : "mic-off-outline"}></ion-icon> {card.hasAudio !== false ? "Audio On" : "Muted"}
-                      </span>
-                    </div>
-                  </>
+                    {userHandRaised && (
+                      <div className="position-absolute top-0 start-0 m-2 px-2 py-1 bg-warning text-dark rounded-2 fw-bold shadow-sm d-flex align-items-center gap-1" style={{ zIndex: 11, fontSize: "11px", marginTop: card.isProf ? "34px" : "8px" }}>
+                        <ion-icon name="hand-left"></ion-icon> Hand Raised
+                      </div>
+                    )}
+
+                    {speaking && (
+                      <div className="position-absolute top-0 end-0 m-2 px-2 py-1 bg-success text-white rounded-pill fw-semibold shadow-sm d-flex align-items-center gap-1" style={{ zIndex: 10, fontSize: "11px" }}>
+                        <ion-icon name="volume-high-outline"></ion-icon> Speaking...
+                      </div>
+                    )}
+
+                    {card.isLocal ? (
+                      <>
+                        <div
+                          ref={localVideoCallbackRef}
+                          className={`w-100 h-100 bg-black ${!camActive ? "d-none" : ""}`}
+                          style={{ objectFit: "cover" }}
+                        />
+
+                        {!camActive && (
+                          <div className="w-100 h-100 d-flex flex-column align-items-center justify-content-center position-absolute top-0 start-0" style={{ backgroundColor: "#101726" }}>
+                            {card.photoURL ? (
+                              <img
+                                src={card.photoURL}
+                                alt={card.fullname}
+                                className="rounded-circle object-fit-cover shadow-sm mb-2 border border-2 border-primary"
+                                style={{ width: "84px", height: "84px" }}
+                              />
+                            ) : (
+                              <div className="bg-primary bg-gradient rounded-circle text-white d-flex align-items-center justify-content-center fw-bold fs-2 shadow-sm mb-2 border border-2 border-primary" style={{ width: "84px", height: "84px" }}>
+                                {card.fullname ? card.fullname.charAt(0).toUpperCase() : "U"}
+                              </div>
+                            )}
+                            <span className="text-white fw-bold">{card.fullname}</span>
+                            <span className="text-secondary small mt-1 d-flex align-items-center gap-1">
+                              <ion-icon name="videocam-off-outline"></ion-icon> Camera is off
+                            </span>
+                          </div>
+                        )}
+
+                        <div className="position-absolute bottom-0 start-0 p-3 bg-dark bg-opacity-75 w-100 d-flex justify-content-between align-items-center" style={{ zIndex: 5 }}>
+                          <span className="text-white fw-bold small d-flex align-items-center gap-1 text-truncate" style={{ maxWidth: "60%" }}>
+                            <ion-icon name="person-circle-outline" style={{ fontSize: "16px" }}></ion-icon> {card.fullname} (You)
+                          </span>
+                          <span className={`badge ${micActive ? "bg-success text-white" : "bg-danger text-white"} d-flex align-items-center gap-1 px-2 py-1`} style={{ fontSize: "11px" }}>
+                            <ion-icon name={micActive ? "mic-outline" : "mic-off-outline"}></ion-icon> {micActive ? "Mic On" : "Muted"}
+                          </span>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div
+                          id={`remote-video-${card.uid}`}
+                          ref={(node) => {
+                            if (node && card.hasVideo && card.videoTrack) {
+                              card.videoTrack.play(node);
+                            }
+                          }}
+                          className={`w-100 h-100 bg-black ${!card.hasVideo ? "d-none" : ""}`}
+                          style={{ objectFit: "cover" }}
+                        />
+
+                        {!card.hasVideo && (
+                          <div className="w-100 h-100 d-flex flex-column align-items-center justify-content-center position-absolute top-0 start-0" style={{ backgroundColor: "#101726" }}>
+                            {card.photoURL ? (
+                              <img
+                                src={card.photoURL}
+                                alt={card.fullname}
+                                className="rounded-circle object-fit-cover shadow-sm mb-2 border border-2 border-primary"
+                                style={{ width: "84px", height: "84px" }}
+                              />
+                            ) : (
+                              <div className="bg-primary bg-gradient rounded-circle text-white d-flex align-items-center justify-content-center fw-bold fs-2 shadow-sm mb-2 border border-2 border-primary" style={{ width: "84px", height: "84px" }}>
+                                {card.fullname ? card.fullname.charAt(0).toUpperCase() : "U"}
+                              </div>
+                            )}
+                            <span className="text-white fw-bold">{card.fullname}</span>
+                            <span className="text-secondary small mt-1 d-flex align-items-center gap-1">
+                              <ion-icon name="videocam-off-outline"></ion-icon> Camera is off
+                            </span>
+                          </div>
+                        )}
+
+                        <div className="position-absolute bottom-0 start-0 p-3 bg-dark bg-opacity-75 w-100 d-flex justify-content-between align-items-center" style={{ zIndex: 5 }}>
+                          <span className="text-white fw-bold small d-flex align-items-center gap-1 text-truncate" style={{ maxWidth: "60%" }}>
+                            <ion-icon name="people-outline" style={{ fontSize: "16px" }}></ion-icon> {card.fullname}
+                          </span>
+                          <span className={`badge ${card.hasAudio !== false ? "bg-success text-white" : "bg-danger text-white"} d-flex align-items-center gap-1 px-2 py-1`} style={{ fontSize: "11px" }}>
+                            <ion-icon name={card.hasAudio !== false ? "mic-outline" : "mic-off-outline"}></ion-icon> {card.hasAudio !== false ? "Audio On" : "Muted"}
+                          </span>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+
+            {remoteUsers.length === 0 && joined && connectionStatus === "connected" && (
+              <div className="text-center text-secondary col-12 py-5">
+                <div className="mb-2 text-primary">
+                  <ion-icon name="pulse-outline" style={{ fontSize: "36px" }}></ion-icon>
+                </div>
+                <p className="fs-6 fw-medium text-white">Waiting for other participants to join the room...</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Zoom-Like Chatroom Sidebar Panel with Working Private Chat Dropdown */}
+        {showChat && (
+          <div className="col-12 col-lg-4 d-flex flex-column">
+            <div
+              className="card border-0 shadow-lg rounded-4 d-flex flex-column overflow-hidden position-relative"
+              style={{
+                backgroundColor: "#131b2e",
+                border: "1px solid rgba(13, 110, 253, 0.3)",
+                height: "650px",
+              }}
+            >
+              <div className="p-3 bg-dark bg-opacity-50 border-bottom border-secondary border-opacity-25 d-flex align-items-center justify-content-between position-relative">
+                <div>
+                  <h6 className="fw-bold mb-0 text-primary d-flex align-items-center gap-2">
+                    <ion-icon name="chatbubbles-outline" style={{ fontSize: "18px" }}></ion-icon> Meeting Chat
+                  </h6>
+                  <small className="text-secondary" style={{ fontSize: "11px" }}>
+                    {selectedRecipientUid === "everyone" 
+                      ? "Chatting with: Everyone (Public)" 
+                      : `Private Chat with ${allUserCards.find((u) => u.firebaseUid === selectedRecipientUid || String(u.uid) === String(selectedRecipientUid))?.fullname || "User"}`}
+                  </small>
+                </div>
+
+                <div className="d-flex align-items-center gap-2">
+                  <div className="position-relative" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      className="btn btn-sm btn-dark text-white rounded-circle d-flex align-items-center justify-content-center border border-secondary border-opacity-50 shadow-sm"
+                      style={{ width: "32px", height: "32px" }}
+                      onClick={() => setShowChatMenu(!showChatMenu)}
+                      title="Choose recipient"
+                    >
+                      <ion-icon name="ellipsis-vertical" style={{ fontSize: "16px" }}></ion-icon>
+                    </button>
+
+                    {showChatMenu && (
+                      <div
+                        className="position-absolute end-0 mt-2 bg-dark border border-secondary rounded-3 shadow-lg py-2"
+                        style={{ zIndex: 1050, width: "230px", backdropFilter: "blur(10px)" }}
+                      >
+                        <div className="px-3 py-1 text-secondary fw-bold" style={{ fontSize: "10px", letterSpacing: "0.5px" }}>
+                          SELECT CHATROOM / USER
+                        </div>
+                        <button
+                          className={`dropdown-item text-white px-3 py-2 small d-flex align-items-center gap-2 ${selectedRecipientUid === "everyone" ? "bg-primary bg-opacity-25 text-primary fw-bold" : ""}`}
+                          onClick={() => {
+                            setSelectedRecipientUid("everyone");
+                            setShowChatMenu(false);
+                          }}
+                          style={{ fontSize: "12px", background: "transparent" }}
+                        >
+                          <ion-icon name="people-outline" style={{ fontSize: "16px" }}></ion-icon> Everyone (All Users Chat)
+                        </button>
+                        <div className="dropdown-divider border-secondary opacity-25 my-1"></div>
+                        <div className="px-3 py-1 text-secondary fw-bold" style={{ fontSize: "10px", letterSpacing: "0.5px" }}>
+                          PRIVATE 2-WAY CHAT
+                        </div>
+                        <div style={{ maxHeight: "180px", overflowY: "auto" }}>
+                          {allUserCards
+                            .filter((u) => {
+                              const myFirebaseUid = auth.currentUser?.uid;
+                              if (u.isLocal) return false;
+                              if (myFirebaseUid && u.firebaseUid === myFirebaseUid) return false;
+                              if (clientRef.current?.uid && String(u.uid) === String(clientRef.current.uid)) return false;
+                              return true;
+                            })
+                            .map((u) => {
+                              const targetId = u.firebaseUid || u.uid;
+                              const isSelected = selectedRecipientUid === targetId;
+
+                              return (
+                                <button
+                                  key={targetId}
+                                  className={`dropdown-item text-white px-3 py-2 small d-flex align-items-center gap-2 text-truncate ${isSelected ? "bg-warning bg-opacity-25 text-warning fw-bold" : ""}`}
+                                  onClick={() => {
+                                    setSelectedRecipientUid(targetId);
+                                    setShowChatMenu(false);
+                                  }}
+                                  style={{ fontSize: "12px", background: "transparent" }}
+                                >
+                                  <ion-icon name="person-outline" style={{ fontSize: "14px" }}></ion-icon> {u.fullname} {u.isProf ? "(Prof)" : ""}
+                                </button>
+                              );
+                            })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <button
+                    className="btn btn-sm btn-dark text-white rounded-circle d-flex align-items-center justify-content-center shadow-sm"
+                    style={{ width: "32px", height: "32px" }}
+                    onClick={() => setShowChat(false)}
+                    title="Close Chat"
+                  >
+                    <ion-icon name="close-outline" style={{ fontSize: "18px" }}></ion-icon>
+                  </button>
+                </div>
+              </div>
+
+              {/* Chat Messages Scrollable Area */}
+              <div
+                className="flex-grow-1 p-3 overflow-y-auto d-flex flex-column gap-3 position-relative"
+                ref={chatScrollRef}
+                onScroll={handleChatScroll}
+                style={{ backgroundColor: "#0e1525" }}
+              >
+                {visibleMessages.length === 0 ? (
+                  <div className="text-center text-secondary my-auto small">
+                    <ion-icon name="chatbubble-ellipses-outline" style={{ fontSize: "36px" }} className="mb-1 text-muted"></ion-icon>
+                    <p className="mb-0">
+                      {selectedRecipientUid === "everyone" 
+                        ? "No messages in public chat yet." 
+                        : "No private messages yet. Start your 1-on-1 chat below!"}
+                    </p>
+                  </div>
+                ) : (
+                  visibleMessages.map((msg) => {
+                    const isMe = msg.senderUid === auth.currentUser?.uid;
+                    const isDM = !!msg.recipientUid;
+                    const timeString = msg.timestamp?.toDate
+                      ? msg.timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                      : "Just now";
+
+                    return (
+                      <div
+                        key={msg.id}
+                        className={`d-flex flex-column ${isMe ? "align-items-end" : "align-items-start"}`}
+                      >
+                        <div className="d-flex align-items-center gap-2 mb-1">
+                          <span className="text-secondary fw-semibold" style={{ fontSize: "12px" }}>
+                            {isMe ? "You" : msg.senderName}
+                          </span>
+                          <span className="text-muted" style={{ fontSize: "10px" }}>
+                            {timeString}
+                          </span>
+                          {isDM && (
+                            <span className="badge bg-warning text-dark px-2 py-0 fw-bold" style={{ fontSize: "10px" }}>
+                              {isMe ? `(Private to ${msg.recipientName})` : "(Private Chat)"}
+                            </span>
+                          )}
+                        </div>
+                        <div
+                          className={`p-2 px-3 rounded-4 shadow-sm text-white ${
+                            isDM
+                              ? "bg-warning bg-opacity-15 border border-warning border-opacity-50 text-dark"
+                              : isMe
+                              ? "bg-primary text-white"
+                              : "bg-dark border border-secondary border-opacity-25"
+                          }`}
+                          style={{
+                            maxWidth: "88%",
+                            fontSize: "13px",
+                            wordBreak: "break-word",
+                            backgroundColor: isDM ? "rgba(255, 193, 7, 0.2)" : undefined,
+                          }}
+                        >
+                          {msg.text}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+
+                {isUserScrolledUp && (
+                  <button
+                    className="position-sticky bottom-0 start-50 translate-middle-x btn btn-sm btn-primary shadow-lg rounded-pill px-3 py-1 d-flex align-items-center gap-1 mb-2 border border-light border-opacity-25"
+                    style={{ fontSize: "12px", zIndex: 10, width: "fit-content" }}
+                    onClick={scrollToBottomChat}
+                  >
+                    <ion-icon name="arrow-down-outline"></ion-icon> New messages below
+                  </button>
                 )}
               </div>
-            </div>
-          );
-        })}
 
-        {remoteUsers.length === 0 && joined && connectionStatus === "connected" && (
-          <div className="text-center text-secondary col-12 py-5">
-            <div className="mb-2 text-primary">
-              <ion-icon name="pulse-outline" style={{ fontSize: "36px" }}></ion-icon>
+              {/* Zoom Chat Input Form */}
+              <form onSubmit={handleSendMessage} className="p-3 bg-dark bg-opacity-50 border-top border-secondary border-opacity-25 d-flex flex-column gap-2">
+                <div className="d-flex align-items-center justify-content-between px-1">
+                  <span className="text-secondary small d-flex align-items-center gap-1" style={{ fontSize: "11px" }}>
+                    <ion-icon name={selectedRecipientUid === "everyone" ? "people-outline" : "person-outline"}></ion-icon>
+                    To: <strong className={selectedRecipientUid === "everyone" ? "text-primary" : "text-warning"}>
+                      {selectedRecipientUid === "everyone" ? "Everyone (Public Chat)" : (allUserCards.find((u) => u.firebaseUid === selectedRecipientUid || String(u.uid) === String(selectedRecipientUid))?.fullname || "User")}
+                    </strong>
+                  </span>
+                  <small className="text-muted" style={{ fontSize: "10px" }}>Click 3 dots to switch</small>
+                </div>
+
+                <div className="input-group">
+                  <input
+                    type="text"
+                    className="form-control form-control-sm bg-dark text-white border-secondary shadow-none py-2"
+                    placeholder={
+                      selectedRecipientUid === "everyone"
+                        ? "Type message to everyone..."
+                        : `Type private message...`
+                    }
+                    value={newMessage}
+                    onChange={(e) => setNewMessage(e.target.value)}
+                    style={{ fontSize: "13px" }}
+                  />
+                  <button
+                    className="btn btn-primary btn-sm px-3 d-flex align-items-center justify-content-center shadow-sm"
+                    type="submit"
+                    title="Send Message"
+                  >
+                    <ion-icon name="send" style={{ fontSize: "14px" }}></ion-icon>
+                  </button>
+                </div>
+              </form>
             </div>
-            <p className="fs-6 fw-medium text-white">Waiting for other participants to join the room...</p>
           </div>
         )}
       </div>
 
       {/* Floating Control Bar */}
-      <div className="d-flex justify-content-center gap-3 py-2 px-4 mt-auto shadow-lg mx-auto rounded-pill mb-2 align-items-center" style={{ backgroundColor: "#131b2e", border: "1px solid rgba(255,255,255,0.08)" }}>
+      <div className="d-flex justify-content-center gap-2 gap-md-3 py-2 px-3 px-md-4 mt-auto shadow-lg mx-auto rounded-pill mb-2 align-items-center flex-wrap" style={{ backgroundColor: "#131b2e", border: "1px solid rgba(255,255,255,0.08)", zIndex: 100 }}>
         <button
           className={`btn ${micActive ? "btn-light text-dark" : "btn-danger"} rounded-circle p-2 d-flex align-items-center justify-content-center shadow-sm`}
           style={{ width: "42px", height: "42px" }}
@@ -1489,6 +2014,43 @@ function OnlineRoom() {
         >
           <ion-icon name={isSharingScreen ? "desktop" : "desktop-outline"} style={{ fontSize: "18px" }}></ion-icon>
         </button>
+
+        <button
+          className={`btn ${isHandRaised ? "btn-warning text-dark fw-bold" : "btn-light text-dark"} rounded-circle p-2 d-flex align-items-center justify-content-center shadow-sm`}
+          style={{ width: "42px", height: "42px" }}
+          onClick={toggleRaiseHand}
+          title={isHandRaised ? "Lower Hand" : "Raise Hand"}
+        >
+          <ion-icon name={isHandRaised ? "hand-left" : "hand-left-outline"} style={{ fontSize: "18px" }}></ion-icon>
+        </button>
+
+        <button
+          className="btn btn-light text-danger rounded-circle p-2 d-flex align-items-center justify-content-center shadow-sm"
+          style={{ width: "42px", height: "42px" }}
+          onClick={sendHeartReaction}
+          title="React Heart"
+        >
+          <ion-icon name="heart" style={{ fontSize: "18px" }}></ion-icon>
+        </button>
+
+        <div className="position-relative">
+          <button
+            className={`btn ${showChat ? "btn-primary text-white" : "btn-light text-dark"} rounded-circle p-2 d-flex align-items-center justify-content-center shadow-sm`}
+            style={{ width: "42px", height: "42px" }}
+            onClick={() => setShowChat(!showChat)}
+            title={showChat ? "Close Chat" : "Open Meeting Chat"}
+          >
+            <ion-icon name={showChat ? "chatbubbles" : "chatbubbles-outline"} style={{ fontSize: "18px" }}></ion-icon>
+          </button>
+          {!showChat && unreadChatCount > 0 && (
+            <span
+              className="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger border border-light text-white fw-bold shadow-sm"
+              style={{ fontSize: "10px", padding: "3px 6px" }}
+            >
+              {unreadChatCount}
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Request Screen Share Confirmation Modal */}

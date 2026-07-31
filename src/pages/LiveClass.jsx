@@ -110,7 +110,12 @@ function LiveClass() {
   };
 
   const handleCardClick = (cls) => {
-    if (user?.role === "professor" || user?.role === "admin" || cls.createdBy === user?.uid) {
+    if (!user) {
+      setInfoModalMessage("You must be logged in to join or interact with a live class.");
+      return;
+    }
+
+    if (cls.createdBy === user?.uid) {
       setSelectedClass(cls);
       setShowActionModal(true);
     } else {
@@ -156,6 +161,11 @@ function LiveClass() {
 
   const handleJoinByCode = (e) => {
     e.preventDefault();
+    if (!user) {
+      setInfoModalMessage("You must be logged in to join a live class room.");
+      return;
+    }
+
     const trimmedCode = joinCode.trim().toUpperCase();
     if (!trimmedCode) {
       setInfoModalMessage("Please enter a valid 6-digit class code.");
@@ -178,6 +188,10 @@ function LiveClass() {
 
   const handleStudentCardCodeSubmit = (e) => {
     e.preventDefault();
+    if (!user) {
+      setInfoModalMessage("You must be logged in to join a room.");
+      return;
+    }
     if (!studentTargetClass) return;
     const trimmedCode = cardJoinCode.trim().toUpperCase();
     
@@ -309,7 +323,7 @@ function LiveClass() {
                       <ion-icon name={cls.started ? "radio-button-on-outline" : "time-outline"}></ion-icon>
                       {cls.started ? "LIVE NOW" : "SCHEDULED"}
                     </span>
-                    {(user?.role === "professor" || user?.role === "admin" || cls.createdBy === user?.uid) && (
+                    {user && cls.createdBy === user?.uid && (
                       <div className="d-flex align-items-center gap-2">
                         <button 
                           className="btn btn-sm btn-light bg-white px-2 py-1 rounded text-primary border border-primary border-opacity-25 shadow-sm d-flex align-items-center gap-1 font-monospace"
@@ -358,7 +372,7 @@ function LiveClass() {
                       <ion-icon name="person-outline"></ion-icon> {cls.creatorName}
                     </span>
                     <span className={`btn btn-sm ${cls.started ? "btn-primary" : "btn-outline-primary"} rounded-pill px-3 fw-semibold`}>
-                      {user?.role === "professor" || cls.createdBy === user?.uid ? "Manage" : cls.started ? "Join Room" : "Waiting..."}
+                      {cls.createdBy === user?.uid ? "Manage" : cls.started ? "Join Room" : "Waiting..."}
                     </span>
                   </div>
                 </div>

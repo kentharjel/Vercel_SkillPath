@@ -154,14 +154,12 @@ function Navbar() {
     if (user.role === "admin assistant" || user.role === "admin_assistant") return [
       { label: "Requests", to: "/requests", badge: requestCount },
       { label: "Learning Paths", to: "/learningpaths" },
-      { label: "Live Class", to: "/liveClass" },
       { label: "Profile", to: "/profile" },
     ];
     if (user.role === "admin") return [
       { label: "Admin Dashboard", to: "/admin" },
       { label: "Requests", to: "/requests", badge: requestCount },
       { label: "Learning Paths", to: "/learningpaths" },
-      { label: "Live Class", to: "/liveClass" },
       { label: "Profile", to: "/profile" },
     ];
     return [];
