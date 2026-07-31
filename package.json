@@ -13,6 +13,8 @@
     "@google/genai": "^2.13.0",
     "@google/generative-ai": "^0.24.1",
     "@supabase/supabase-js": "^2.110.8",
+    "agora-access-token": "^2.0.4",
+    "agora-rtc-sdk-ng": "^4.24.6",
     "bootstrap": "^5.3.8",
     "cors": "^2.8.6",
     "firebase": "^12.8.0",

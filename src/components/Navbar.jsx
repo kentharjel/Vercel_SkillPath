@@ -132,6 +132,7 @@ function Navbar() {
     if (!user) return [
       { label: "Learning Paths", to: "/learningpaths" },
       { label: "Classes", to: "/classes" },
+      { label: "Live Class", to: "/liveClass" },
       { label: "Progress", to: "/progress" },
       { label: "Achievements", to: "/achievements" },
       { label: "About Us", to: "/about" },
@@ -139,24 +140,28 @@ function Navbar() {
     if (user.role === "student") return [
       { label: "Learning Paths", to: "/learningpaths" },
       { label: "Classes", to: "/classes" },
+      { label: "Live Class", to: "/liveClass" },
       { label: "Progress", to: "/progress" },
       { label: "Achievements", to: "/achievements" },
       { label: "Profile", to: "/profile" },
     ];
     if (user.role === "professor") return [
       { label: "Classes", to: "/classes" },
+      { label: "Live Class", to: "/liveClass" },
       { label: "About Us", to: "/about" },
       { label: "Profile", to: "/profile" },
     ];
     if (user.role === "admin assistant" || user.role === "admin_assistant") return [
       { label: "Requests", to: "/requests", badge: requestCount },
       { label: "Learning Paths", to: "/learningpaths" },
+      { label: "Live Class", to: "/liveClass" },
       { label: "Profile", to: "/profile" },
     ];
     if (user.role === "admin") return [
       { label: "Admin Dashboard", to: "/admin" },
       { label: "Requests", to: "/requests", badge: requestCount },
       { label: "Learning Paths", to: "/learningpaths" },
+      { label: "Live Class", to: "/liveClass" },
       { label: "Profile", to: "/profile" },
     ];
     return [];

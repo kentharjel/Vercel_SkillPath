@@ -17,7 +17,7 @@ exports.generateQuiz = functions.https.onRequest((req, res) => {
       const { lessonTitle, lessonContent, difficulty, numQuestions } = req.body;
 
       // 1. Setup the AI model
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+      const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
 
       // 2. Create strict instructions so the AI replies in the exact JSON format your React app needs
       const prompt = `

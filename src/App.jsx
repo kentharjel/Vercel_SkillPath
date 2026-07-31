@@ -18,6 +18,8 @@ import ViewLesson from './classes/Viewlesson'
 import TakeQuiz from './classes/Takequiz'
 import Profile from './pages/Profile'
 import Requests from './pages/Requests'
+import LiveClass from './pages/LiveClass'
+import OnlineRoom from './pages/OnlineRoom'
 
 function App() {
   const [count, setCount] = useState(0)
@@ -49,6 +51,8 @@ function App() {
             <Route path="/takequiz" element={<TakeQuiz />} />
             <Route path="/profile" element={<Profile />} />
             <Route path="/requests" element={<Requests />} />
+            <Route path="/liveclass" element={<LiveClass />} />
+            <Route path="/room/:channelName" element={<OnlineRoom />} />
           </Routes>
         </main>
 
