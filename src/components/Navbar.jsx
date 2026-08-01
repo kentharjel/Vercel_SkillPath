@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { auth, db } from "../firebase";
 import { signOut } from "firebase/auth";
-import { doc, getDoc, collection, onSnapshot } from "firebase/firestore";
+import { doc, collection, onSnapshot } from "firebase/firestore";
 import { useNavigate, Link, NavLink, useLocation } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -35,65 +35,71 @@ function Navbar() {
 
   useEffect(() => {
     let unsubscribeRequests = () => {};
+    let unsubscribeUserDoc = () => {};
 
-    const unsubscribeAuth = auth.onAuthStateChanged(async (currentUser) => {
+    const unsubscribeAuth = auth.onAuthStateChanged((currentUser) => {
+      unsubscribeUserDoc();
+      unsubscribeRequests();
+
       if (currentUser) {
-        try {
-          const userDoc = await getDoc(doc(db, "users", currentUser.uid));
-          let userData;
-          
-          if (userDoc.exists()) {
-            userData = { 
-              uid: currentUser.uid, 
-              photoURL: currentUser.photoURL || null,
-              ...userDoc.data() 
-            };
-          } else {
-            userData = { 
-              uid: currentUser.uid, 
-              fullname: currentUser.displayName || "User", 
-              photoURL: currentUser.photoURL || null,
-              role: "student" 
-            };
-          }
-          
-          setUser(userData);
+        // Real-time listener on the user's Firestore document so that when sign-up 
+        // verification completes and the document is created, the Navbar updates instantly.
+        unsubscribeUserDoc = onSnapshot(
+          doc(db, "users", currentUser.uid),
+          (userDoc) => {
+            if (userDoc.exists()) {
+              const userData = { 
+                uid: currentUser.uid, 
+                photoURL: currentUser.photoURL || null,
+                ...userDoc.data() 
+              };
+              setUser(userData);
 
-          // Real-time counter synchronization if authenticated as an administrator or admin assistant
-          if (
-            userData.role === "admin" || 
-            userData.role === "admin assistant" || 
-            userData.role === "admin_assistant"
-          ) {
-            unsubscribeRequests = onSnapshot(
-              collection(db, "tickets"),
-              (snapshot) => {
-                const activeTickets = snapshot.docs.filter(doc => doc.data().status !== "resolved");
-                setRequestCount(activeTickets.length);
-              },
-              (error) => {
-                console.error("Error listening to database ticket streams:", error);
+              // Real-time counter synchronization if authenticated as an administrator or admin assistant
+              if (
+                userData.role === "admin" || 
+                userData.role === "admin assistant" || 
+                userData.role === "admin_assistant"
+              ) {
+                unsubscribeRequests = onSnapshot(
+                  collection(db, "tickets"),
+                  (snapshot) => {
+                    const activeTickets = snapshot.docs.filter(doc => doc.data().status !== "resolved");
+                    setRequestCount(activeTickets.length);
+                  },
+                  (error) => {
+                    console.error("Error listening to database ticket streams:", error);
+                  }
+                );
+              } else {
+                unsubscribeRequests();
+                setRequestCount(0);
               }
-            );
+            } else {
+              // User document does not exist yet (sign-up/email verification is still pending)
+              setUser(null);
+              setRequestCount(0);
+              unsubscribeRequests();
+            }
+            setLoading(false);
+          },
+          (error) => {
+            console.error("Error listening to user document:", error);
+            setUser(null);
+            setRequestCount(0);
+            setLoading(false);
           }
-        } catch (err) {
-          setUser({ 
-            uid: currentUser.uid, 
-            fullname: currentUser.displayName || "User", 
-            photoURL: currentUser.photoURL || null,
-            role: "student" 
-          });
-        }
+        );
       } else {
         setUser(null);
         setRequestCount(0);
-        unsubscribeRequests();
+        setLoading(false);
       }
-      setLoading(false);
     });
 
     return () => {
       unsubscribeAuth();
+      unsubscribeUserDoc();
       unsubscribeRequests();
     };
   }, []);
@@ -167,7 +173,6 @@ function Navbar() {
 
   const menuItems = loading ? [] : getMenuItems();
 
-  // Helper to extract uploaded avatar image URL across various standard key formats
   const userAvatar = user?.profilePicture || user?.photoURL || user?.avatar || user?.imageUrl;
 
   return (
@@ -239,7 +244,6 @@ function Navbar() {
                       <motion.div whileHover={{ scale: 1.02 }} className="d-flex align-items-center gap-2" style={{ position: 'relative' }}>
                         <span>{item.label}</span>
                         
-                        {/* Dynamic Count Badge */}
                         {item.badge !== undefined && item.badge > 0 && (
                           <span className="badge rounded-pill bg-danger" style={{ fontSize: "0.72rem", padding: "0.35em 0.6em" }}>
                             {item.badge}
@@ -303,7 +307,6 @@ function Navbar() {
 
       <div style={{ height: "76px" }} className="w-100 d-block"></div>
 
-      {/* ANIMATED LOGOUT MODAL */}
       <AnimatePresence>
         {modal.show && (
           <motion.div 

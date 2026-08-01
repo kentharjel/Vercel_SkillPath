@@ -20,6 +20,7 @@ import Profile from './pages/Profile'
 import Requests from './pages/Requests'
 import LiveClass from './pages/LiveClass'
 import OnlineRoom from './pages/OnlineRoom'
+import Preferences from './pages/preferences'
 
 function App() {
   const [count, setCount] = useState(0)
@@ -53,6 +54,7 @@ function App() {
             <Route path="/requests" element={<Requests />} />
             <Route path="/liveclass" element={<LiveClass />} />
             <Route path="/room/:channelName" element={<OnlineRoom />} />
+            <Route path="/preferences" element={<Preferences />} />
           </Routes>
         </main>
 

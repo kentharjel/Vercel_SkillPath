@@ -20,6 +20,16 @@ function Profile() {
     classesCount: 0,
   });
 
+  // IT Tracks Reference for Preferences Mapping
+  const IT_TRACKS = [
+    { id: "web-dev", title: "Web Dev", icon: "🌐", label: "Frontend & Web Development" },
+    { id: "mobile-dev", title: "Mobile App", icon: "📱", label: "Mobile App Development" },
+    { id: "backend-cloud", title: "Backend & Cloud", icon: "☁️", label: "Backend & Cloud Engineering" },
+    { id: "ui-ux", title: "UI/UX", icon: "🎨", label: "UI/UX & Product Design" },
+    { id: "cybersecurity", title: "Cybersecurity", icon: "🔒", label: "Cybersecurity & Networking" },
+    { id: "data-ai", title: "Data & AI", icon: "🤖", label: "Data Science & AI" },
+  ];
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
@@ -209,6 +219,37 @@ function Profile() {
                   <p className="text-muted small mb-0">@{user.email?.split("@")[0]} • {user.email}</p>
                 </div>
               </div>
+            </motion.div>
+
+            {/* CHOSEN PREFERENCES SECTION */}
+            <motion.div 
+              className="card border-0 shadow-sm rounded-4 p-4 mb-4 bg-white"
+              initial={{ opacity: 0, y: 15 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.1 }}
+            >
+              <div className="d-flex align-items-center mb-3">
+                <span className="fs-4 me-2">🎯</span>
+                <h5 className="fw-bold text-dark mb-0">Chosen IT Track Preferences</h5>
+              </div>
+              {user.preferences && user.preferences.length > 0 ? (
+                <div className="d-flex flex-wrap gap-2">
+                  {user.preferences.map((prefId) => {
+                    const track = IT_TRACKS.find((t) => t.id === prefId);
+                    return track ? (
+                      <div 
+                        key={track.id} 
+                        className="badge bg-light text-dark border px-3 py-2 rounded-pill d-flex align-items-center gap-2 fs-6 fw-semibold shadow-sm"
+                      >
+                        <span>{track.icon}</span>
+                        <span>{track.label}</span>
+                      </div>
+                    ) : null;
+                  })}
+                </div>
+              ) : (
+                <p className="text-muted small mb-0">No IT track preferences selected yet.</p>
+              )}
             </motion.div>
 
             {/* WIDGET STATS GRID */}

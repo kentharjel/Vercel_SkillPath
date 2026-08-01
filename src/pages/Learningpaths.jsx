@@ -17,12 +17,24 @@ function LearningPaths() {
   const [paths, setPaths] = useState([]);
   const [appliedPaths, setAppliedPaths] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [filterTab, setFilterTab] = useState("all");
 
   const [form, setForm] = useState({
     title: "",
     level: "Beginner",
+    track: "web-dev",
     description: "",
   });
+
+  // IT Tracks Reference from Preferences
+  const IT_TRACKS = [
+    { id: "web-dev", title: "Web Dev", icon: "🌐", label: "Frontend & Web Development" },
+    { id: "mobile-dev", title: "Mobile App", icon: "📱", label: "Mobile App Development" },
+    { id: "backend-cloud", title: "Backend & Cloud", icon: "☁️", label: "Backend & Cloud Engineering" },
+    { id: "ui-ux", title: "UI/UX", icon: "🎨", label: "UI/UX & Product Design" },
+    { id: "cybersecurity", title: "Cybersecurity", icon: "🔒", label: "Cybersecurity & Networking" },
+    { id: "data-ai", title: "Data & AI", icon: "🤖", label: "Data Science & AI" },
+  ];
 
   // Modal States
   const [modal, setModal] = useState({
@@ -42,7 +54,7 @@ function LearningPaths() {
     setModal({ show: true, title, message, isConfirm: true, onConfirm });
   };
 
-  // Helper to check if user has management privileges (Admin or Admin Assistant with space/underscore support)
+  // Helper to check if user has management privileges
   const canManage = 
     user?.role === "admin" || 
     user?.role === "admin assistant" || 
@@ -54,6 +66,7 @@ function LearningPaths() {
       try {
         if (!currentUser) {
           setUser(null);
+          setFilterTab("all");
         } else {
           const userDocSnap = await getDocs(collection(db, "users"));
           const userDoc = userDocSnap.docs.find((d) => d.id === currentUser.uid);
@@ -67,11 +80,15 @@ function LearningPaths() {
               collection(db, "users", currentUser.uid, "userPaths")
             );
             setAppliedPaths(appliedSnap.docs.map((d) => d.id));
+            setFilterTab("recommendations");
+          } else {
+            setFilterTab("all");
           }
         }
       } catch (err) {
         console.error(err);
         setUser(null);
+        setFilterTab("all");
       } finally {
         setLoading(false);
       }
@@ -109,14 +126,15 @@ function LearningPaths() {
       title: form.title,
       type: "learning_path",
       level: form.level,
+      track: form.track,
       description: form.description,
       createdAt: serverTimestamp(),
     });
 
-    setForm({ title: "", level: "Beginner", description: "" });
+    setForm({ title: "", level: "Beginner", track: "web-dev", description: "" });
     showAlert("Success!", "The learning path has been published.");
     
-    // Re-fetch instead of reload for better UX
+    // Re-fetch paths
     const snap = await getDocs(collection(db, "content"));
     setPaths(snap.docs.map(d => ({ id: d.id, ...d.data() })).filter(d => d.type === "learning_path"));
   };
@@ -151,6 +169,17 @@ function LearningPaths() {
     setAppliedPaths((prev) => [...prev, pathId]);
     showAlert("Enrolled!", "Successfully applied to the learning path. Happy learning!");
   };
+
+  // FILTER LOGIC FOR STUDENT VIEW
+  const filteredPaths = paths.filter((path) => {
+    if (filterTab === "all") return true;
+    if (filterTab === "recommendations") {
+      const userPrefs = user?.preferences || [];
+      if (userPrefs.length === 0) return true;
+      return userPrefs.includes(path.track);
+    }
+    return path.track === filterTab;
+  });
 
   if (loading) {
     return (
@@ -190,11 +219,26 @@ function LearningPaths() {
                       <label className="form-label small fw-bold text-uppercase text-muted">Path Title</label>
                       <input
                         className="form-control form-control-lg bg-light border-0"
-                        placeholder="e.g. Web Development"
+                        placeholder="e.g. React Mastery"
                         value={form.title}
                         onChange={(e) => setForm({ ...form, title: e.target.value })}
                         required
                       />
+                    </div>
+
+                    <div className="mb-3">
+                      <label className="form-label small fw-bold text-uppercase text-muted">IT Track / Category</label>
+                      <select
+                        className="form-select bg-light border-0"
+                        value={form.track}
+                        onChange={(e) => setForm({ ...form, track: e.target.value })}
+                      >
+                        {IT_TRACKS.map((t) => (
+                          <option key={t.id} value={t.id}>
+                            {t.icon} {t.label}
+                          </option>
+                        ))}
+                      </select>
                     </div>
 
                     <div className="mb-3">
@@ -233,93 +277,124 @@ function LearningPaths() {
 
           {/* LIST */}
           <div className={canManage ? "col-lg-8" : "col-12"}>
-            <div className="d-flex justify-content-between align-items-center mb-4">
-              <h3 className="fw-bold m-0 text-dark">Available Paths</h3>
-              <span className="badge bg-white text-dark border shadow-sm px-3 py-2 rounded-pill">
-                {paths.length} Paths Found
-              </span>
+            {/* TITLE & RIGHT-ALIGNED COMPACT DROPDOWN FILTER BAR */}
+            <div className="d-flex flex-column flex-md-row justify-content-between align-items-md-center gap-3 mb-4">
+              <h3 className="fw-bold m-0 text-dark">
+                {filterTab === "recommendations" ? "Recommended For You" : "Available Paths"}
+              </h3>
+
+              <div className="d-flex align-items-center gap-2 ms-auto">
+                {!canManage && (
+                  <select
+                    className="form-select form-select-sm bg-white border shadow-sm rounded-pill px-3 py-2 text-dark fw-semibold"
+                    style={{ width: "220px" }}
+                    value={filterTab}
+                    onChange={(e) => setFilterTab(e.target.value)}
+                  >
+                    {user?.role === "student" && (
+                      <option value="recommendations">✨ Recommendations</option>
+                    )}
+                    <option value="all">🌟 All Paths</option>
+                    {IT_TRACKS.map((track) => (
+                      <option key={track.id} value={track.id}>
+                        {track.icon} {track.title}
+                      </option>
+                    ))}
+                  </select>
+                )}
+
+                <span className="badge bg-white text-dark border shadow-sm px-3 py-2 rounded-pill">
+                  {filteredPaths.length} Found
+                </span>
+              </div>
             </div>
 
             <div className="row g-4">
-              {paths.length > 0 ? (
-                paths.map((path) => (
-                  <div key={path.id} className={canManage ? "col-md-6" : "col-md-4"}>
-                    <div className="card h-100 border-0 shadow-sm rounded-4 hover-shadow transition">
-                      <div className="card-body p-4 d-flex flex-column">
-                        <div className="mb-3">
-                          <span
-                            className={`badge px-3 py-2 rounded-pill ${
-                              path.level === "Beginner"
-                                ? "bg-primary-subtle text-primary"
-                                : path.level === "Intermediate"
-                                ? "bg-success-subtle text-success"
-                                : "bg-danger-subtle text-danger"
-                            }`}
-                          >
-                            ● {path.level}
-                          </span>
-                        </div>
-                        
-                        <h5 className="fw-bold text-dark mb-2">{path.title}</h5>
-                        <p className="text-muted small flex-grow-1" style={{ lineHeight: "1.6" }}>
-                          {path.description}
-                        </p>
+              {filteredPaths.length > 0 ? (
+                filteredPaths.map((path) => {
+                  const trackObj = IT_TRACKS.find((t) => t.id === path.track) || IT_TRACKS[0];
+                  return (
+                    <div key={path.id} className={canManage ? "col-md-6" : "col-md-4"}>
+                      <div className="card h-100 border-0 shadow-sm rounded-4 hover-shadow transition">
+                        <div className="card-body p-4 d-flex flex-column">
+                          <div className="d-flex justify-content-between align-items-center mb-3">
+                            <span
+                              className={`badge px-3 py-2 rounded-pill ${
+                                path.level === "Beginner"
+                                  ? "bg-primary-subtle text-primary"
+                                  : path.level === "Intermediate"
+                                  ? "bg-success-subtle text-success"
+                                  : "bg-danger-subtle text-danger"
+                              }`}
+                            >
+                              ● {path.level}
+                            </span>
+                            <span className="badge bg-light text-secondary border px-2 py-1 rounded-pill small">
+                              {trackObj.icon} {trackObj.title}
+                            </span>
+                          </div>
+                          
+                          <h5 className="fw-bold text-dark mb-2">{path.title}</h5>
+                          <p className="text-muted small flex-grow-1" style={{ lineHeight: "1.6" }}>
+                            {path.description}
+                          </p>
 
-                        <div className="mt-auto pt-4 border-top">
-                          {canManage && (
-                            <div className="d-flex gap-2">
-                              <button
-                                className="btn btn-sm btn-light text-danger fw-bold flex-grow-1"
-                                onClick={() => handleDeletePath(path.id)}
-                              >
-                                Delete
-                              </button>
-                              <button
-                                className="btn btn-sm btn-primary fw-bold flex-grow-1"
-                                onClick={() => navigate("/viewpath", { state: { pathId: path.id } })}
-                              >
-                                Manage
-                              </button>
-                            </div>
-                          )}
-
-                          {user?.role === "student" && (
-                            <div className="w-100">
-                              {appliedPaths.includes(path.id) ? (
+                          <div className="mt-auto pt-4 border-top">
+                            {canManage && (
+                              <div className="d-flex gap-2">
                                 <button
-                                  className="btn btn-success w-100 py-2 fw-bold"
+                                  className="btn btn-sm btn-light text-danger fw-bold flex-grow-1"
+                                  onClick={() => handleDeletePath(path.id)}
+                                >
+                                  Delete
+                                </button>
+                                <button
+                                  className="btn btn-sm btn-primary fw-bold flex-grow-1"
                                   onClick={() => navigate("/viewpath", { state: { pathId: path.id } })}
                                 >
-                                  Continue Learning
+                                  Manage
                                 </button>
-                              ) : (
-                                <button
-                                  className="btn btn-primary w-100 py-2 fw-bold"
-                                  onClick={() => handleApplyPath(path.id)}
-                                >
-                                  Enroll Now
-                                </button>
-                              )}
-                            </div>
-                          )}
+                              </div>
+                            )}
 
-                          {!user && (
-                            <button
-                              className="btn btn-primary w-100 py-2 fw-bold"
-                              onClick={() => navigate("/login")}
-                            >
-                              Log in to Apply
-                            </button>
-                          )}
+                            {user?.role === "student" && (
+                              <div className="w-100">
+                                {appliedPaths.includes(path.id) ? (
+                                  <button
+                                    className="btn btn-success w-100 py-2 fw-bold"
+                                    onClick={() => navigate("/viewpath", { state: { pathId: path.id } })}
+                                  >
+                                    Continue Learning
+                                  </button>
+                                ) : (
+                                  <button
+                                    className="btn btn-primary w-100 py-2 fw-bold"
+                                    onClick={() => handleApplyPath(path.id)}
+                                  >
+                                    Enroll Now
+                                  </button>
+                                )}
+                              </div>
+                            )}
+
+                            {!user && (
+                              <button
+                                className="btn btn-primary w-100 py-2 fw-bold"
+                                onClick={() => navigate("/login")}
+                              >
+                                Log in to Apply
+                              </button>
+                            )}
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               ) : (
                 <div className="col-12">
                   <div className="text-center bg-white py-5 rounded-4 shadow-sm">
-                    <p className="text-muted mb-0">No learning paths have been created yet.</p>
+                    <p className="text-muted mb-0">No learning paths found for this filter category.</p>
                   </div>
                 </div>
               )}
