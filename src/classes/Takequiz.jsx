@@ -20,6 +20,10 @@ function TakeQuiz() {
   const [isFinished, setIsFinished] = useState(false);
   const [score, setScore] = useState(0); 
 
+  // AI Explanation State
+  const [explanations, setExplanations] = useState({});
+  const [loadingExplanation, setLoadingExplanation] = useState(false);
+
   // Admin Edit State
   const [editTitle, setEditTitle] = useState("");
   const [editQuestions, setEditQuestions] = useState([]);
@@ -70,7 +74,7 @@ function TakeQuiz() {
         questions: editQuestions
       });
       setQuiz({ ...quiz, title: editTitle, questions: editQuestions });
-      setShowSuccessModal(true); // Show custom modal instead of alert
+      setShowSuccessModal(true);
     } catch (err) {
       console.error(err);
     }
@@ -95,6 +99,64 @@ function TakeQuiz() {
   };
 
   // --- STUDENT LOGIC ---
+  const fetchAiExplanation = async (questionObj, selectedIdx) => {
+    setLoadingExplanation(true);
+    try {
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+      if (!apiKey) {
+        setExplanations(prev => ({
+          ...prev,
+          [currentQuestion]: `Correct Answer: ${questionObj.options[questionObj.correctAnswer]}`
+        }));
+        setLoadingExplanation(false);
+        return;
+      }
+
+      const prompt = `You are an educational assistant. A student answered a multiple-choice question.
+      Question: "${questionObj.questionText}"
+      Options: ${JSON.stringify(questionObj.options)}
+      Correct Answer Index: ${questionObj.correctAnswer} (${questionObj.options[questionObj.correctAnswer]})
+      Student's Answer Index: ${selectedIdx} (${questionObj.options[selectedIdx]})
+
+      Provide a concise, clear explanation (1-2 sentences) of why the correct answer is right.`;
+
+      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent?key=${apiKey}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }]
+        })
+      });
+
+      if (!response.ok) throw new Error("Failed to fetch explanation");
+      const data = await response.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "No explanation provided.";
+
+      setExplanations(prev => ({
+        ...prev,
+        [currentQuestion]: text.trim()
+      }));
+    } catch (err) {
+      console.error("AI Explanation Error:", err);
+      setExplanations(prev => ({
+        ...prev,
+        [currentQuestion]: `The correct answer is: ${questionObj.options[questionObj.correctAnswer]}`
+      }));
+    } finally {
+      setLoadingExplanation(false);
+    }
+  };
+
+  const handleSelectOption = (idx) => {
+    if (selectedAnswers[currentQuestion] !== undefined) return; // Prevent changing after selection
+    
+    const updatedAnswers = { ...selectedAnswers, [currentQuestion]: idx };
+    setSelectedAnswers(updatedAnswers);
+
+    const q = quiz.questions[currentQuestion];
+    fetchAiExplanation(q, idx);
+  };
+
   const handleNext = () => {
     if (currentQuestion < quiz.questions.length - 1) {
       setCurrentQuestion(currentQuestion + 1);
@@ -184,7 +246,6 @@ function TakeQuiz() {
           </button>
         </div>
 
-        {/* SUCCESS MODAL FOR PROFESSOR */}
         {showSuccessModal && (
           <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)" }}>
             <div className="modal-dialog modal-dialog-centered">
@@ -245,6 +306,8 @@ function TakeQuiz() {
 
   // --- RENDER: STUDENT VIEW (TAKING QUIZ) ---
   const q = quiz.questions[currentQuestion];
+  const answered = selectedAnswers[currentQuestion] !== undefined;
+
   return (
     <div className="container py-5">
       <div className="progress mb-4" style={{ height: "10px" }}>
@@ -253,19 +316,49 @@ function TakeQuiz() {
       <div className="card border-0 shadow-sm p-4 p-md-5 rounded-4">
         <h3 className="fw-bold mb-4">{q.questionText}</h3>
         <div className="d-flex flex-column gap-3">
-          {q.options.map((opt, idx) => (
-            <button 
-              key={idx} 
-              className={`btn btn-lg text-start p-3 rounded-4 border-2 ${selectedAnswers[currentQuestion] === idx ? 'btn-primary' : 'btn-outline-light text-dark border-light-subtle'}`}
-              onClick={() => setSelectedAnswers({ ...selectedAnswers, [currentQuestion]: idx })}
-            >
-              {opt}
-            </button>
-          ))}
+          {q.options.map((opt, idx) => {
+            const isSelected = selectedAnswers[currentQuestion] === idx;
+            const isCorrect = idx === q.correctAnswer;
+
+            let btnStyle = "btn-outline-light text-dark border-light-subtle";
+            if (answered) {
+              if (isCorrect) {
+                btnStyle = "btn-success text-white fw-bold border-success";
+              } else if (isSelected && !isCorrect) {
+                btnStyle = "btn-danger text-white fw-bold border-danger";
+              } else {
+                btnStyle = "btn-outline-secondary text-muted opacity-50";
+              }
+            }
+
+            return (
+              <button 
+                key={idx} 
+                disabled={answered}
+                className={`btn btn-lg text-start p-3 rounded-4 border-2 ${btnStyle}`}
+                onClick={() => handleSelectOption(idx)}
+              >
+                {opt} {answered && isCorrect && " ✅"} {answered && isSelected && !isCorrect && " ❌"}
+              </button>
+            );
+          })}
         </div>
+
+        {/* AI EXPLANATION BOX */}
+        {answered && (
+          <div className="mt-4 p-4 rounded-4 bg-light border border-primary-subtle shadow-sm animate-fade-in">
+            <h6 className="fw-bold text-primary mb-2">💡 Explanation (Gemini 3.5 Flash-Lite)</h6>
+            {loadingExplanation ? (
+              <p className="text-muted mb-0 small">Generating explanation...</p>
+            ) : (
+              <p className="text-dark mb-0">{explanations[currentQuestion] || "Loading explanation..."}</p>
+            )}
+          </div>
+        )}
+
         <button 
           className="btn btn-primary mt-5 py-3 rounded-pill fw-bold" 
-          disabled={selectedAnswers[currentQuestion] === undefined}
+          disabled={!answered}
           onClick={handleNext}
         >
           {currentQuestion === quiz.questions.length - 1 ? "Submit Quiz" : "Next Question"}

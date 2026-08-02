@@ -15,6 +15,21 @@ import {
   orderBy
 } from "firebase/firestore";
 
+const getDifficultyBadgeClass = (difficulty) => {
+  switch (difficulty) {
+    case "Beginner": return "bg-success text-white";
+    case "Very Easy": return "bg-success text-white opacity-75";
+    case "Easy": return "bg-info text-white";
+    case "Elementary": return "bg-primary text-white";
+    case "Medium": return "bg-warning text-dark";
+    case "Hard": return "bg-danger text-white opacity-75";
+    case "Advanced": return "bg-danger text-white";
+    case "Expert": return "bg-dark text-white";
+    case "Master": return "bg-dark text-warning border border-warning";
+    default: return "bg-secondary text-white";
+  }
+};
+
 function ViewClass() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -41,6 +56,7 @@ function ViewClass() {
 
   const [showQuizModal, setShowQuizModal] = useState(false);
   const [quizTitle, setQuizTitle] = useState("");
+  const [quizDifficulty, setQuizDifficulty] = useState("Medium");
   const [questions, setQuestions] = useState([
     { questionText: "", options: ["", "", "", ""], correctAnswer: 0 }
   ]);
@@ -56,6 +72,10 @@ function ViewClass() {
   const [aiNumQuestions, setAiNumQuestions] = useState("");
   const [generatingAi, setGeneratingAi] = useState(false);
   const [aiSuccessModal, setAiSuccessModal] = useState(false);
+
+  // Quiz Flow Guard States for Medium+ difficulty
+  const [quizFlowStep, setQuizFlowStep] = useState(null); // null, 'studyCheck', 'riskWarning', 'proceedWarning'
+  const [targetQuizItem, setTargetQuizItem] = useState(null);
 
   // Modal for lesson/quiz deletion
   const [deleteModal, setDeleteModal] = useState({ show: false, id: null, title: "", attachments: [] });
@@ -256,12 +276,27 @@ function ViewClass() {
       title: quizTitle,
       questions: questions,
       type: "quiz",
+      difficulty: quizDifficulty,
       createdAt: serverTimestamp()
     });
     setQuizTitle("");
     setQuestions([{ questionText: "", options: ["", "", "", ""], correctAnswer: 0 }]);
+    setQuizDifficulty("Medium");
     setShowQuizModal(false);
     fetchClassDetails(user);
+  };
+
+  const handleOpenQuiz = (item) => {
+    if (user.role === "student" && item.type === "quiz") {
+      const diff = item.difficulty || "Medium";
+      const highDifficulties = ["Medium", "Hard", "Advanced", "Expert", "Master"];
+      if (highDifficulties.includes(diff)) {
+        setTargetQuizItem(item);
+        setQuizFlowStep("studyCheck");
+        return;
+      }
+    }
+    navigate(item.type === 'lesson' ? "/viewlesson" : "/takequiz", { state: { contentId: item.id, classId } });
   };
 
   const handleGenerateAiQuiz = async (e) => {
@@ -404,6 +439,7 @@ function ViewClass() {
         title: finalTitle,
         questions: parsedQuiz.questions,
         type: "quiz",
+        difficulty: aiDifficulty,
         createdAt: serverTimestamp()
       });
 
@@ -473,6 +509,11 @@ function ViewClass() {
                             <span className={`badge px-3 py-2 ${item.type === 'lesson' ? 'bg-info text-white' : 'bg-warning text-dark'}`}>
                               {item.type.toUpperCase()}
                             </span>
+                            {item.type === 'quiz' && (
+                              <span className={`badge px-3 py-2 ${getDifficultyBadgeClass(item.difficulty || "Medium")}`}>
+                                📊 {item.difficulty || "Medium"}
+                              </span>
+                            )}
                             {isCompleted && (
                               <span className="badge bg-success px-3 py-2">DONE ✅</span>
                             )}
@@ -519,7 +560,7 @@ function ViewClass() {
                         <div className="d-flex justify-content-end mt-4">
                           <button 
                             className={`btn rounded-pill px-4 shadow-sm ${isCompleted ? 'btn-success' : 'btn-primary'}`} 
-                            onClick={() => navigate(item.type === 'lesson' ? "/viewlesson" : "/takequiz", { state: { contentId: item.id, classId } })}
+                            onClick={() => handleOpenQuiz(item)}
                           >
                             {isCompleted ? "View Result" : "Open"}
                           </button>
@@ -558,6 +599,97 @@ function ViewClass() {
         />
       )}
 
+      {/* QUIZ FLOW MODALS (STUDY CHECK & RISK WARNINGS FOR MEDIUM+) */}
+      {quizFlowStep === 'studyCheck' && (
+        <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)", zIndex: 1080 }}>
+          <div className="modal-dialog modal-dialog-centered">
+            <div className="modal-content border-0 shadow-lg rounded-4 p-4 text-center">
+              <div className="display-4 text-primary mb-3">📚</div>
+              <h5 className="fw-bold mb-2">Quiz Preparation Check</h5>
+              <p className="text-muted mb-4">Did you study or review the lesson for this quiz?</p>
+              <div className="d-flex gap-3 justify-content-center">
+                <button 
+                  className="btn btn-outline-secondary px-4 rounded-pill" 
+                  onClick={() => setQuizFlowStep(null)}
+                >
+                  Cancel
+                </button>
+                <button 
+                  className="btn btn-danger px-4 rounded-pill fw-bold" 
+                  onClick={() => setQuizFlowStep('riskWarning')}
+                >
+                  No
+                </button>
+                <button 
+                  className="btn btn-primary px-4 rounded-pill fw-bold" 
+                  onClick={() => setQuizFlowStep('proceedWarning')}
+                >
+                  Yes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {quizFlowStep === 'riskWarning' && (
+        <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)", zIndex: 1090 }}>
+          <div className="modal-dialog modal-dialog-centered">
+            <div className="modal-content border-0 shadow-lg rounded-4 p-4 text-center">
+              <div className="display-4 text-warning mb-3">⚠️</div>
+              <h5 className="fw-bold mb-2">Take the Risk?</h5>
+              <p className="text-muted mb-4">Are you really going to take the risk of taking this quiz without studying?</p>
+              <div className="d-flex gap-3 justify-content-center">
+                <button 
+                  className="btn btn-primary px-4 rounded-pill fw-bold" 
+                  onClick={() => setQuizFlowStep(null)}
+                >
+                  Cancel
+                </button>
+                <button 
+                  className="btn btn-danger px-4 rounded-pill fw-bold" 
+                  onClick={() => {
+                    setQuizFlowStep(null);
+                    navigate("/takequiz", { state: { contentId: targetQuizItem.id, classId } });
+                  }}
+                >
+                  Take Risk
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {quizFlowStep === 'proceedWarning' && (
+        <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)", zIndex: 1090 }}>
+          <div className="modal-dialog modal-dialog-centered">
+            <div className="modal-content border-0 shadow-lg rounded-4 p-4 text-center">
+              <div className="display-4 text-success mb-3">✅</div>
+              <h5 className="fw-bold mb-2">Ready to Proceed?</h5>
+              <p className="text-muted mb-4">Are you really, really ready to proceed with this quiz?</p>
+              <div className="d-flex gap-3 justify-content-center">
+                <button 
+                  className="btn btn-light px-4 rounded-pill" 
+                  onClick={() => setQuizFlowStep(null)}
+                >
+                  Cancel
+                </button>
+                <button 
+                  className="btn btn-primary px-4 rounded-pill fw-bold" 
+                  onClick={() => {
+                    setQuizFlowStep(null);
+                    navigate("/takequiz", { state: { contentId: targetQuizItem.id, classId } });
+                  }}
+                >
+                  Proceed
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* LESSON DELETE CONFIRMATION MODAL */}
       {deleteModal.show && (
         <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)" }}>
@@ -590,6 +722,19 @@ function ViewClass() {
                   <label className="form-label small fw-bold text-muted">QUIZ TITLE</label>
                   <input type="text" className="form-control form-control-lg fw-bold" placeholder="e.g. Unit 1 Mastery Check" 
                     onChange={e => setQuizTitle(e.target.value)} required />
+                </div>
+                <div className="mb-4">
+                  <label className="form-label small fw-bold text-muted">DIFFICULTY LEVEL</label>
+                  <select className="form-select" value={quizDifficulty} onChange={(e) => setQuizDifficulty(e.target.value)}>
+                    <option value="Beginner">Beginner</option>
+                    <option value="Very Easy">Very Easy</option>
+                    <option value="Easy">Easy</option>
+                    <option value="Medium">Medium</option>
+                    <option value="Hard">Hard</option>
+                    <option value="Advanced">Advanced</option>
+                    <option value="Expert">Expert</option>
+                    <option value="Master">Master</option>
+                  </select>
                 </div>
                 {questions.map((q, qIndex) => (
                   <div key={qIndex} className="p-4 border rounded-4 mb-4 bg-white shadow-sm position-relative">
@@ -714,9 +859,14 @@ function ViewClass() {
                   <div className="col-md-6">
                     <label className="form-label small fw-bold text-muted">DIFFICULTY LEVEL</label>
                     <select className="form-select" value={aiDifficulty} onChange={(e) => setAiDifficulty(e.target.value)}>
+                      <option value="Beginner">Beginner</option>
+                      <option value="Very Easy">Very Easy</option>
                       <option value="Easy">Easy</option>
                       <option value="Medium">Medium</option>
                       <option value="Hard">Hard</option>
+                      <option value="Advanced">Advanced</option>
+                      <option value="Expert">Expert</option>
+                      <option value="Master">Master</option>
                     </select>
                   </div>
                   <div className="col-md-6">
@@ -1006,13 +1156,23 @@ function StudentDetailsModal({ student, scores, classContent, onClose }) {
                         const attempt = scores.find(a => a.quizId === quiz.id);
                         const totalQ = quiz.questions?.length || 0;
                         const rawScore = attempt ? Math.round((attempt.score / 100) * totalQ) : 0;
+                        const scorePercent = attempt ? (attempt.score !== undefined ? attempt.score : (rawScore / totalQ) * 100) : 0;
+                        const isPassed = scorePercent >= 75;
 
                         return (
                           <tr key={quiz.id} className="border-bottom">
                             <td className="fw-bold text-dark py-2">{quiz.title}</td>
                             <td className="text-center fw-bold text-primary">{attempt ? `${rawScore} / ${totalQ}` : "---"}</td>
                             <td className="text-end">
-                              {attempt ? <span className="badge bg-success-subtle text-success">Passed</span> : <span className="badge bg-secondary-subtle text-muted">Pending</span>}
+                              {attempt ? (
+                                isPassed ? (
+                                  <span className="badge bg-success-subtle text-success">Passed</span>
+                                ) : (
+                                  <span className="badge bg-danger-subtle text-danger">Failed</span>
+                                )
+                              ) : (
+                                <span className="badge bg-secondary-subtle text-muted">Pending</span>
+                              )}
                             </td>
                           </tr>
                         );
