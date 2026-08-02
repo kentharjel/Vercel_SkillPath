@@ -33,6 +33,7 @@ function Navbar() {
     }
   }, [location]);
 
+  // Real-time Auth & Firestore User Listener
   useEffect(() => {
     let unsubscribeRequests = () => {};
     let unsubscribeUserDoc = () => {};
@@ -42,8 +43,6 @@ function Navbar() {
       unsubscribeRequests();
 
       if (currentUser) {
-        // Real-time listener on the user's Firestore document so that when sign-up 
-        // verification completes and the document is created, the Navbar updates instantly.
         unsubscribeUserDoc = onSnapshot(
           doc(db, "users", currentUser.uid),
           (userDoc) => {
@@ -55,7 +54,6 @@ function Navbar() {
               };
               setUser(userData);
 
-              // Real-time counter synchronization if authenticated as an administrator or admin assistant
               if (
                 userData.role === "admin" || 
                 userData.role === "admin assistant" || 
@@ -76,7 +74,6 @@ function Navbar() {
                 setRequestCount(0);
               }
             } else {
-              // User document does not exist yet (sign-up/email verification is still pending)
               setUser(null);
               setRequestCount(0);
               unsubscribeRequests();
@@ -103,6 +100,59 @@ function Navbar() {
       unsubscribeRequests();
     };
   }, []);
+
+  // --- Auto-Logout for 5 Minutes Inactivity Feature ---
+  useEffect(() => {
+    // Only run inactivity timer if a user is logged in
+    if (!user) return;
+
+    let inactivityTimer;
+
+    const performInactivityLogout = async () => {
+      try {
+        await signOut(auth);
+        setUser(null);
+        setModal({
+          show: true,
+          title: "Session Expired",
+          message: "You have been automatically logged out due to 5 minutes of inactivity.",
+          isConfirm: false,
+          onConfirm: null,
+        });
+        setTimeout(() => {
+          setModal((prev) => ({ ...prev, show: false }));
+          navigate("/");
+        }, 3000);
+      } catch (err) {
+        console.error("Inactivity logout error:", err);
+      }
+    };
+
+    const resetInactivityTimer = () => {
+      clearTimeout(inactivityTimer);
+      // 5 minutes = 5 * 60 * 1000 ms = 300000 ms
+      inactivityTimer = setTimeout(performInactivityLogout, 5 * 60 * 1000);
+    };
+
+    // Events that count as user activity
+    const activityEvents = ["mousemove", "mousedown", "keypress", "scroll", "touchstart"];
+
+    // Attach event listeners
+    activityEvents.forEach((event) => {
+      window.addEventListener(event, resetInactivityTimer);
+    });
+
+    // Initialize timer on load/login
+    resetInactivityTimer();
+
+    // Cleanup listeners and timeout on unmount or user logout
+    return () => {
+      clearTimeout(inactivityTimer);
+      activityEvents.forEach((event) => {
+        window.removeEventListener(event, resetInactivityTimer);
+      });
+    };
+  }, [user, navigate]);
 
   const handleLogoutClick = () => {
     setModal({
@@ -172,7 +222,6 @@ function Navbar() {
   };
 
   const menuItems = loading ? [] : getMenuItems();
-
   const userAvatar = user?.profilePicture || user?.photoURL || user?.avatar || user?.imageUrl;
 
   return (

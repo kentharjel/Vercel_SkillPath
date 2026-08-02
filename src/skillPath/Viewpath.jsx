@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { auth, db } from "../firebase";
 import { supabase } from "../supabase";
 import { GoogleGenAI, Type } from "@google/genai";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   collection,
   doc,
@@ -36,6 +37,7 @@ function ViewPath() {
   const [hearts, setHearts] = useState(5);
   const [showHeartModal, setShowHeartModal] = useState(false);
   const [nextHeartTime, setNextHeartTime] = useState("");
+  const [showHeartExplosion, setShowHeartExplosion] = useState(false); // Heart explosion animation state
 
   // --- STUDENT NAVIGATION ENGINE ---
   const [viewMode, setViewMode] = useState("list");
@@ -44,6 +46,10 @@ function ViewPath() {
 
   // --- FILE PREVIEW MODAL STATE ---
   const [previewFile, setPreviewFile] = useState(null);
+
+  // --- ALERT MODAL STATE ---
+  const [alertModalMessage, setAlertModalMessage] = useState("");
+  const showAlert = (msg) => setAlertModalMessage(msg);
 
   // --- ADMIN/PROFESSOR/ADMIN ASSISTANT FORM STATES ---
   const [lessonForm, setLessonForm] = useState({ title: "", description: "", links: [], files: [] });
@@ -66,6 +72,9 @@ function ViewPath() {
 
   // --- AI GENERATION SUCCESS MODAL STATE ---
   const [aiSuccessModalOpen, setAiSuccessModalOpen] = useState(false);
+
+  // --- DUPLICATE QUIZ CONFLICT MODAL STATE ---
+  const [duplicateQuizModal, setDuplicateQuizModal] = useState(null);
 
   // --- MODAL STATES ---
   const [editLessonTarget, setEditLessonTarget] = useState(null);
@@ -282,7 +291,7 @@ function ViewPath() {
 
         if (uploadError) {
           console.error("Supabase Upload Error:", uploadError);
-          alert(`Failed to upload ${file.name}`);
+          showAlert(`Failed to upload ${file.name}`);
           continue;
         }
 
@@ -313,7 +322,7 @@ function ViewPath() {
       }
     } catch (err) {
       console.error("Upload error:", err);
-      alert("Error uploading file to Supabase Storage.");
+      showAlert("Error uploading file to Supabase Storage.");
     } finally {
       setUploadingFile(false);
     }
@@ -345,7 +354,7 @@ function ViewPath() {
   };
 
   const addLinkToForm = () => {
-    if (!linkInput.title || !linkInput.url) return alert("Fill link title and URL");
+    if (!linkInput.title || !linkInput.url) return showAlert("Fill link title and URL");
     setLessonForm({ ...lessonForm, links: [...(lessonForm.links || []), linkInput] });
     setLinkInput({ title: "", url: "" });
   };
@@ -413,7 +422,7 @@ function ViewPath() {
 
   const handleAddLesson = async (e) => {
     e.preventDefault();
-    if (!lessonForm.title) return alert("Title required");
+    if (!lessonForm.title) return showAlert("Title required");
     await addDoc(collection(db, "content", pathId, "lessons"), {
       title: lessonForm.title,
       description: lessonForm.description,
@@ -426,8 +435,24 @@ function ViewPath() {
     fetchData();
   };
 
+  // --- MANUAL QUIZ CREATION HANDLER WITH DUPLICATE CHECK ---
   const handleAddQuiz = async () => {
-    if (!selectedLessonForQuiz) return alert("Select a lesson first!");
+    if (!selectedLessonForQuiz) return showAlert("Select a lesson first!");
+    
+    const existingQuiz = quizzes.find(q => q.lessonId === selectedLessonForQuiz);
+    if (existingQuiz) {
+      setDuplicateQuizModal({
+        lessonId: selectedLessonForQuiz,
+        existingQuizId: existingQuiz.id,
+        type: "manual"
+      });
+      return;
+    }
+
+    await executeAddManualQuiz();
+  };
+
+  const executeAddManualQuiz = async () => {
     await addDoc(collection(db, "content", pathId, "quizzes"), {
       lessonId: selectedLessonForQuiz,
       title: `Quiz: ${lessons.find(l => l.id === selectedLessonForQuiz)?.title}`,
@@ -440,8 +465,35 @@ function ViewPath() {
     fetchData();
   };
 
-  // --- AI GENERATION HANDLER WITH AUTO-RETRY & MULTIMODAL SUPPORT ---
+  // --- AI GENERATION HANDLER WITH DUPLICATE CHECK & AUTO-RETRY ---
   const handleGenerateAiQuiz = async () => {
+    // Enforce that a lesson must be chosen for attachment in both lesson and paste/attach modes so it appears in users' views
+    if (!aiLessonTarget) {
+      showAlert("Please choose which lesson will be attached to this quiz so it can be seen in the user view!");
+      return;
+    }
+
+    if (aiInputMode === "paste") {
+      if (!aiPastedText.trim() && aiAttachedFiles.length === 0) {
+        showAlert("Please paste some lesson text or attach an image/PDF for the AI to analyze!");
+        return;
+      }
+    }
+
+    const existingQuiz = quizzes.find(q => q.lessonId === aiLessonTarget);
+    if (existingQuiz) {
+      setDuplicateQuizModal({
+        lessonId: aiLessonTarget,
+        existingQuizId: existingQuiz.id,
+        type: "ai"
+      });
+      return;
+    }
+
+    await executeGenerateAiQuiz();
+  };
+
+  const executeGenerateAiQuiz = async () => {
     let promptContent = "";
     let targetLessonTitle = "Custom Content Quiz";
     let targetLessonIdForQuiz = aiLessonTarget;
@@ -449,13 +501,11 @@ function ViewPath() {
     const finalNumQuestions = aiNumQuestions || 5;
 
     if (aiInputMode === "lesson") {
-      if (!aiLessonTarget) return alert("Please select a lesson for the AI to read!");
       const targetLesson = lessons.find(l => l.id === aiLessonTarget);
-      if (!targetLesson) return alert("Lesson not found.");
+      if (!targetLesson) return showAlert("Lesson not found.");
       targetLessonTitle = targetLesson.title;
       promptContent = `Generate a ${aiDifficulty} quiz with ${finalNumQuestions} questions based on this lesson:\n\nTitle: ${targetLesson.title}\nContent: ${targetLesson.description}`;
       
-      // If the selected lesson also has attached files, process them for AI analysis
       if (targetLesson.files && targetLesson.files.length > 0) {
         for (const f of targetLesson.files) {
           const part = await fileToGenerativePart(f.url, f.type);
@@ -463,9 +513,6 @@ function ViewPath() {
         }
       }
     } else {
-      if (!aiPastedText.trim() && aiAttachedFiles.length === 0) {
-        return alert("Please paste some lesson text or attach an image/PDF for the AI to analyze!");
-      }
       promptContent = `Generate a ${aiDifficulty} quiz with ${finalNumQuestions} questions based on the provided text and/or attached files:\n\nContent:\n${aiPastedText}`;
       
       for (const f of aiAttachedFiles) {
@@ -530,7 +577,7 @@ function ViewPath() {
       
       if (data.questions) {
         await addDoc(collection(db, "content", pathId, "quizzes"), {
-          lessonId: targetLessonIdForQuiz || null,
+          lessonId: targetLessonIdForQuiz,
           title: `AI Quiz (${aiDifficulty}): ${targetLessonTitle}`,
           questions: data.questions, 
           createdBy: user.uid,
@@ -544,17 +591,37 @@ function ViewPath() {
         fetchData();
         setAiSuccessModalOpen(true);
       } else {
-        alert("Failed to parse AI response.");
+        showAlert("Failed to parse AI response.");
       }
     } catch (err) {
       console.error("AI Generation Error:", err);
       if (err.status === 429) {
-        alert("You have hit the free tier rate limit. Please wait about a minute before trying again.");
+        showAlert("You have hit the free tier rate limit. Please wait about a minute before trying again.");
       } else {
-        alert("Error generating quiz with AI. Check console for details.");
+        showAlert("Error generating quiz with AI. Check console for details.");
       }
     } finally {
       setIsGeneratingAi(false);
+    }
+  };
+
+  // --- HANDLE CONFLICT RESOLUTION (DELETE EXISTING & CONTINUE) ---
+  const handleConfirmDeleteAndAttach = async () => {
+    if (!duplicateQuizModal) return;
+    try {
+      await deleteDoc(doc(db, "content", pathId, "quizzes", duplicateQuizModal.existingQuizId));
+      const type = duplicateQuizModal.type;
+      setDuplicateQuizModal(null);
+
+      if (type === "manual") {
+        await executeAddManualQuiz();
+      } else if (type === "ai") {
+        await executeGenerateAiQuiz();
+      }
+    } catch (err) {
+      console.error("Error replacing quiz:", err);
+      showAlert("Failed to replace existing quiz.");
+      setDuplicateQuizModal(null);
     }
   };
 
@@ -653,13 +720,19 @@ function ViewPath() {
   const handleRedoQuiz = async (quizId) => {
     const currentQuiz = quizzes.find(q => q.id === quizId);
     if (isQuizPerfect(currentQuiz)) {
-      alert("You have already perfected this quiz! No need to retake.");
+      showAlert("You have already perfected this quiz! No need to retake.");
       return;
     }
     if (hearts <= 0) {
-      alert("You have no hearts left! Please wait for them to regenerate.");
+      showAlert("You have no hearts left! Please wait for them to regenerate.");
       return;
     }
+
+    // Trigger heart explosion animation
+    setShowHeartExplosion(true);
+    setTimeout(() => {
+      setShowHeartExplosion(false);
+    }, 1000);
 
     if (quizTopRef.current) {
       quizTopRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -745,10 +818,21 @@ function ViewPath() {
             color: white !important;
             border-color: #198754 !important;
           }
-          .choice-card-btn.answer-incorrect {
-            background-color: #dc3545 !important;
-            color: white !important;
-            border-color: #dc3545 !important;
+          @keyframes rockCrack {
+            0% { transform: scale(1) rotate(0deg); }
+            20% { transform: scale(0.96) rotate(-2deg); filter: brightness(0.9); }
+            40% { transform: scale(1.03) rotate(2deg); }
+            60% { transform: scale(0.97) rotate(-1deg); }
+            80% { transform: scale(1.01) rotate(1deg); }
+            100% { transform: scale(1) rotate(0deg); }
+          }
+          .choice-card-btn.choice-cracked {
+            background: linear-gradient(135deg, #4b5563 0%, #1f2937 100%) !important;
+            color: #e5e7eb !important;
+            border: 2px dashed #9ca3af !important;
+            animation: rockCrack 0.45s ease-in-out;
+            box-shadow: inset 0 3px 6px rgba(0, 0, 0, 0.6);
+            cursor: not-allowed !important;
           }
           .heart-main { color: #ff4b2b; font-size: 1.2rem; cursor: pointer; }
           .heart-container:hover { background-color: #fff5f5 !important; }
@@ -772,6 +856,42 @@ function ViewPath() {
           }
         `}
       </style>
+
+      {/* --- HEART EXPLOSION ANIMATION OVERLAY --- */}
+      <AnimatePresence>
+        {showHeartExplosion && (
+          <div className="position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center" style={{ pointerEvents: 'none', zIndex: 9999 }}>
+            {/* Big central heart scaling and disappearing */}
+            <motion.div
+              initial={{ scale: 0.2, opacity: 0 }}
+              animate={{ scale: [0.2, 2.8, 3.2], opacity: [1, 1, 0] }}
+              transition={{ duration: 0.7, ease: "easeOut" }}
+              style={{ fontSize: "6rem", position: "absolute" }}
+            >
+              ❤️
+            </motion.div>
+
+            {/* Exploding smaller hearts flying outwards */}
+            {[...Array(12)].map((_, i) => {
+              const angle = (i * 30 * Math.PI) / 180;
+              const distance = 140 + Math.random() * 60;
+              const targetX = Math.cos(angle) * distance;
+              const targetY = Math.sin(angle) * distance;
+              return (
+                <motion.div
+                  key={i}
+                  initial={{ x: 0, y: 0, scale: 0.5, opacity: 1 }}
+                  animate={{ x: targetX, y: targetY, scale: [0.5, 1.4, 0.2], opacity: [1, 1, 0] }}
+                  transition={{ duration: 0.8, ease: "easeOut" }}
+                  style={{ fontSize: "2rem", position: "absolute" }}
+                >
+                  ❤️
+                </motion.div>
+              );
+            })}
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* HEADER SECTION */}
       {!isQuizOngoing && (
@@ -1135,7 +1255,7 @@ function ViewPath() {
                             const selected = answers[qi] === ci;
                             let extraClass = "";
                             if (selected) {
-                              extraClass = c.isCorrect ? "answer-correct" : "answer-incorrect";
+                              extraClass = c.isCorrect ? "answer-correct" : "choice-cracked";
                             }
                             return (
                               <div key={ci} className="col-md-6">
@@ -1174,6 +1294,29 @@ function ViewPath() {
         )}
       </div>
 
+      {/* --- DUPLICATE QUIZ CONFLICT MODAL --- */}
+      {duplicateQuizModal && (
+        <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)", zIndex: 1060 }}>
+          <div className="modal-dialog modal-dialog-centered modal-sm">
+            <div className="modal-content border-0 rounded-4 shadow p-4 text-center bg-white text-dark">
+              <div className="mb-3">
+                <span style={{ fontSize: '3rem' }}>⚠️</span>
+              </div>
+              <h5 className="fw-bold mb-2">Quiz Already Exists</h5>
+              <p className="text-muted small mb-4">This lesson already has an attached quiz. Would you like to delete the existing quiz and continue attaching this new quiz?</p>
+              <div className="d-flex gap-2">
+                <button className="btn btn-danger w-100 rounded-pill fw-bold" onClick={handleConfirmDeleteAndAttach}>
+                  Delete & Continue
+                </button>
+                <button className="btn btn-light w-100 rounded-pill fw-bold" onClick={() => setDuplicateQuizModal(null)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* --- AI QUIZ GENERATION MODAL (WITH TOGGLE & FILE/IMAGE ANALYSIS) --- */}
       {aiModalOpen && (
         <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)" }}>
@@ -1181,6 +1324,15 @@ function ViewPath() {
             <div className="modal-content border-0 rounded-4 shadow p-4 bg-white text-dark">
               <h4 className="fw-bold text-primary mb-3">🤖 Generate Quiz with AI</h4>
               
+              {/* SELECT LESSON TO ATTACH TO (Required for user view visibility) */}
+              <label className="form-label small fw-bold text-dark mb-1">SELECT LESSON TO ATTACH QUIZ TO <span className="text-danger">*</span></label>
+              <select className="form-select mb-3 border-primary text-dark" value={aiLessonTarget} onChange={e => setAiLessonTarget(e.target.value)}>
+                <option value="">Choose a lesson to match with...</option>
+                {lessons.map(l => (
+                  <option key={l.id} value={l.id}>{l.title}</option>
+                ))}
+              </select>
+
               {/* TOGGLE OPTIONS */}
               <div className="btn-group w-100 mb-3" role="group">
                 <input 
@@ -1204,26 +1356,8 @@ function ViewPath() {
                 <label className="btn btn-outline-primary" htmlFor="modePaste">Paste Lesson / Attach Files</label>
               </div>
 
-              {aiInputMode === "lesson" ? (
+              {aiInputMode === "paste" && (
                 <>
-                  <label className="form-label small fw-bold text-dark mb-1">SELECT LESSON TO READ</label>
-                  <select className="form-select mb-3 border-primary text-dark" value={aiLessonTarget} onChange={e => setAiLessonTarget(e.target.value)}>
-                    <option value="">Choose a lesson...</option>
-                    {lessons.map(l => (
-                      <option key={l.id} value={l.id}>{l.title}</option>
-                    ))}
-                  </select>
-                </>
-              ) : (
-                <>
-                  <label className="form-label small fw-bold text-dark mb-1">SELECT LESSON TO ATTACH QUIZ TO</label>
-                  <select className="form-select mb-3 border-primary text-dark" value={aiLessonTarget} onChange={e => setAiLessonTarget(e.target.value)}>
-                    <option value="">Choose a lesson to match with...</option>
-                    {lessons.map(l => (
-                      <option key={l.id} value={l.id}>{l.title}</option>
-                    ))}
-                  </select>
-
                   <label className="form-label small fw-bold text-dark mb-1">PASTE LESSON CONTENT</label>
                   <textarea 
                     className="form-control mb-3 text-dark" 
@@ -1246,7 +1380,7 @@ function ViewPath() {
                       const validFiles = Array.from(selectedFiles).filter(file => {
                         const isSupported = file.type.startsWith('image/') || file.type === 'application/pdf';
                         if (!isSupported) {
-                          alert(`Skipped ${file.name}: Only images and PDF files are supported for direct AI analysis.`);
+                          showAlert(`Skipped ${file.name}: Only images and PDF files are supported for direct AI analysis.`);
                         }
                         return isSupported;
                       });
@@ -1273,7 +1407,7 @@ function ViewPath() {
                         setAiAttachedFiles(prev => [...prev, ...uploaded]);
                       } catch (err) {
                         console.error("AI File Upload Error:", err);
-                        alert("Failed to upload attachment.");
+                        showAlert("Failed to upload attachment.");
                       } finally {
                         setUploadingFile(false);
                       }
@@ -1342,6 +1476,24 @@ function ViewPath() {
         </div>
       )}
 
+      {/* --- GENERIC ALERT MODAL --- */}
+      {alertModalMessage && (
+        <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.6)", zIndex: 1070 }}>
+          <div className="modal-dialog modal-dialog-centered modal-sm">
+            <div className="modal-content border-0 rounded-4 shadow p-4 text-center bg-white text-dark">
+              <div className="mb-3">
+                <span style={{ fontSize: '3rem' }}>⚠️</span>
+              </div>
+              <h5 className="fw-bold mb-2">Notice</h5>
+              <p className="text-muted small mb-4">{alertModalMessage}</p>
+              <button className="btn btn-primary w-100 rounded-pill fw-bold" onClick={() => setAlertModalMessage("")}>
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* --- FILE PREVIEW MODAL --- */}
       {previewFile && (
         <div className="modal d-block" style={{ backgroundColor: "rgba(0,0,0,0.8)", zIndex: 1050 }}>
@@ -1395,7 +1547,7 @@ function ViewPath() {
               <div className="bg-light p-3 rounded-4 mb-4 border border-primary">
                 <h6 className="fw-bold mb-1 text-primary">✨ Unlimited Hearts</h6>
                 <p className="small mb-2">Never wait for hearts again with a Pro subscription.</p>
-                <button className="btn btn-primary w-100 rounded-pill fw-bold" onClick={() => alert("Subscription feature coming soon!")}>Subscribe Now</button>
+                <button className="btn btn-primary w-100 rounded-pill fw-bold" onClick={() => showAlert("Subscription feature coming soon!")}>Subscribe Now</button>
               </div>
 
               <button className="btn btn-light w-100 rounded-pill fw-bold" onClick={() => setShowHeartModal(false)}>Close</button>

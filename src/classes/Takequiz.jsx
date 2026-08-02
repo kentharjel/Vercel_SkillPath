@@ -41,7 +41,14 @@ function TakeQuiz() {
         const quizSnap = await getDoc(doc(db, `classes/${classId}/content`, contentId));
         if (quizSnap.exists()) {
           const data = quizSnap.data();
-          setQuiz(data);
+          let quizQuestions = data.questions || [];
+
+          // Randomize question sequence for students only
+          if (userData.role === "student") {
+            quizQuestions = [...quizQuestions].sort(() => Math.random() - 0.5);
+          }
+
+          setQuiz({ ...data, questions: quizQuestions });
           setEditTitle(data.title || "");
           setEditQuestions(data.questions || []);
 
