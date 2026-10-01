@@ -1,7 +1,15 @@
 import { useLocation, useNavigate } from "react-router-dom";
 import { useState, useEffect } from "react";
 import { doc, setDoc, getDoc, deleteDoc, serverTimestamp } from "firebase/firestore";
-import { createUserWithEmailAndPassword, signInWithPopup, GoogleAuthProvider, signOut, deleteUser, updatePassword } from "firebase/auth";
+import { 
+  createUserWithEmailAndPassword, 
+  signInWithEmailAndPassword, 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  signOut, 
+  deleteUser, 
+  updatePassword 
+} from "firebase/auth";
 import emailjs from "@emailjs/browser";
 import { db, auth } from "../firebase";
 
@@ -76,13 +84,41 @@ function SignUp() {
 
     let user = null;
     try {
-      // 1. Create Auth User
-      const userCredential = await createUserWithEmailAndPassword(
-        auth,
-        email.trim(),
-        password
-      );
-      user = userCredential.user;
+      // 1. Create or Recover Auth User
+      try {
+        const userCredential = await createUserWithEmailAndPassword(
+          auth,
+          email.trim(),
+          password
+        );
+        user = userCredential.user;
+      } catch (createErr) {
+        if (createErr.code === "auth/email-already-in-use") {
+          // Email exists. Check if it's an unverified account from an interrupted session.
+          try {
+            const loginCredential = await signInWithEmailAndPassword(
+              auth, 
+              email.trim(), 
+              password
+            );
+            const userDoc = await getDoc(doc(db, "users", loginCredential.user.uid));
+            
+            if (!userDoc.exists()) {
+              // User is in Auth but not in Firestore. Reuse this account.
+              user = loginCredential.user;
+            } else {
+              // Fully registered user, throw the original error
+              throw createErr;
+            }
+          } catch (loginErr) {
+            // Sign-in failed (e.g., wrong password), throw the original error
+            throw createErr;
+          }
+        } else {
+          throw createErr;
+        }
+      }
+
       setPendingUser(user);
 
       // 2. Generate 6-digit OTP code & 5-minute expiration
