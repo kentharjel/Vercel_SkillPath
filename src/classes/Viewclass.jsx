@@ -30,6 +30,14 @@ const getDifficultyBadgeClass = (difficulty) => {
   }
 };
 
+const formatDate = (timestamp) => {
+  if (!timestamp) return "Recently added";
+  if (timestamp.toDate) {
+    return timestamp.toDate().toLocaleDateString("en-US", { year: 'numeric', month: 'short', day: 'numeric' });
+  }
+  return new Date(timestamp).toLocaleDateString("en-US", { year: 'numeric', month: 'short', day: 'numeric' });
+};
+
 function ViewClass() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -44,6 +52,7 @@ function ViewClass() {
   const [studentAttempts, setStudentAttempts] = useState([]);
   const [allQuizScores, setAllQuizScores] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
+  const [contentFilter, setContentFilter] = useState("all");
 
   // Modal State for Student Details / Achievements / Progress
   const [selectedStudent, setSelectedStudent] = useState(null);
@@ -459,6 +468,11 @@ function ViewClass() {
     }
   };
 
+  const filteredContent = classContent.filter(item => {
+    if (contentFilter === "all") return true;
+    return item.type === contentFilter;
+  });
+
   if (loading || !classData) return <div className="text-center py-5">Loading...</div>;
 
   return (
@@ -483,7 +497,26 @@ function ViewClass() {
       <section className="py-5">
         <div className="container">
           <div className="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-3">
-            <h4 className="fw-bold mb-0">Class Materials</h4>
+            <div className="d-flex align-items-center gap-3 flex-wrap">
+              <h4 className="fw-bold mb-0">Class Materials</h4>
+              <div className="btn-group shadow-sm" role="group">
+                <button 
+                  type="button" 
+                  className={`btn btn-sm ${contentFilter === 'all' ? 'btn-primary' : 'btn-outline-primary'}`} 
+                  onClick={() => setContentFilter('all')}>All
+                </button>
+                <button 
+                  type="button" 
+                  className={`btn btn-sm ${contentFilter === 'lesson' ? 'btn-primary' : 'btn-outline-primary'}`} 
+                  onClick={() => setContentFilter('lesson')}>Lessons
+                </button>
+                <button 
+                  type="button" 
+                  className={`btn btn-sm ${contentFilter === 'quiz' ? 'btn-primary' : 'btn-outline-primary'}`} 
+                  onClick={() => setContentFilter('quiz')}>Quizzes
+                </button>
+              </div>
+            </div>
             {user.role === "professor" && (
               <div className="d-flex gap-2 flex-wrap">
                 <button className="btn btn-primary shadow-sm" onClick={() => setShowLessonModal(true)}>+ Add Lesson</button>
@@ -496,8 +529,8 @@ function ViewClass() {
           </div>
 
           <div className="row g-4">
-            {classContent.length > 0 ? (
-              classContent.map((item) => {
+            {filteredContent.length > 0 ? (
+              filteredContent.map((item) => {
                 const isCompleted = item.type === 'quiz' && studentAttempts.includes(item.id);
                 
                 return (
@@ -552,8 +585,10 @@ function ViewClass() {
 
                         <div className="mb-3">
                           <h5 className={`fw-bold mb-1 ${isCompleted ? 'text-success' : ''}`}>{item.title}</h5>
-                          <p className="text-muted small mb-0">
-                            {item.type === 'lesson' ? 'Reading & Media Material' : `${item.questions?.length} Questions`}
+                          <p className="text-muted small mb-0 d-flex align-items-center gap-2">
+                            <span>{item.type === 'lesson' ? 'Reading & Media Material' : `${item.questions?.length} Questions`}</span>
+                            <span className="opacity-50">•</span>
+                            <span>Added: {formatDate(item.createdAt)}</span>
                           </p>
                         </div>
 
@@ -571,7 +606,7 @@ function ViewClass() {
                 );
               })
             ) : (
-              <div className="text-center py-5 text-muted">No materials posted yet.</div>
+              <div className="text-center py-5 text-muted">No materials found for this filter.</div>
             )}
           </div>
         </div>
